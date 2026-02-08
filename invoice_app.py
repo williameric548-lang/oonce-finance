@@ -9,6 +9,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 
 # --- 1. 全局配置 ---
+# 注意：API Key 需要支持你选择的模型
 API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
 FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
@@ -37,17 +38,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- 3. 核心逻辑 ---
-def get_available_model():
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            for model in data.get('models', []):
-                if 'generateContent' in model.get('supportedGenerationMethods', []):
-                    return model['name'].replace('models/', '')
-    except: pass
-    return "gemini-1.5-flash"
 
 def get_historical_zar_rate(date_str):
     try:
@@ -59,8 +49,10 @@ def get_historical_zar_rate(date_str):
         return None
     except: return None
 
-def extract_invoice_data(uploaded_file, mode="input"):
-    model_name = get_available_model()
+def extract_invoice_data(uploaded_file, mode="input", model_choice="gemini-1.5-flash"):
+    """
+    V19 更新：接收 model_choice 参数，允许用户切换更强的模型
+    """
     mime_type = "image/jpeg"
     if hasattr(uploaded_file, 'name') and uploaded_file.name.lower().endswith('.pdf'): 
         mime_type = "application/pdf"
@@ -71,30 +63,42 @@ def extract_invoice_data(uploaded_file, mode="input"):
     target_entity = "Vendor/Supplier Name" if mode == "input" else "Client/Customer Name"
     entity_key = "vendor" if mode == "input" else "client"
     
-    # 【V18 更新 Prompt】: 教会 AI 识别无效图片
+    # 强化版 Prompt，专门针对金额识别
     prompt = f"""
-    You are a professional invoice OCR system. Extract data into JSON.
+    You are an expert financial auditor OCR system. 
+    Task: Extract invoice data into JSON.
+
+    CRITICAL INSTRUCTIONS FOR ACCURACY:
+    1. **TOTAL AMOUNT**: Look for "Total Due", "Balance Due", "Grand Total". Be extremely careful with decimal points (e.g., distinguish 100.00 from 10000).
+    2. **DATE**: Identify the main Invoice Date. Format: YYYY-MM-DD.
+    3. **INVOICE NO**: Extract the unique Invoice Number.
+    4. **{target_entity}**: Extract the full company name.
+    5. **NO HALLUCINATIONS**: If the image is blurry or not an invoice, return {{"error": "Image unclear/Not invoice"}}.
     
-    CRITICAL RULES:
-    1. If the image is NOT an invoice (e.g. selfie, person, landscape, blurry text, random object), return strictly: {{"error": "Not an invoice"}}.
-    2. If the image is an invoice but too blurry to read numbers, return: {{"error": "Blurry image"}}.
-    3. Fields required: "date" (YYYY-MM-DD), "invoice_number", "{entity_key}", "subtotal", "vat", "total", "currency".
-    4. "invoice_number": Extract the main identifier. If missing, return "UNKNOWN".
-    5. "vat": If not shown, set to 0.
-    6. Return pure numbers for amounts. If currency is Dollars, return "USD".
+    Output JSON format:
+    {{
+        "date": "YYYY-MM-DD", 
+        "invoice_number": "STRING", 
+        "{entity_key}": "STRING", 
+        "subtotal": NUMBER, 
+        "vat": NUMBER, 
+        "total": NUMBER, 
+        "currency": "USD" or "ZAR"
+    }}
     """
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
+    # 动态使用用户选择的模型
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_choice}:generateContent?key={API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
 
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=120) # 延长超时时间给 Pro 模型
         if response.status_code == 200:
             text = response.json()['candidates'][0]['content']['parts'][0]['text']
             clean_text = text.replace('```json', '').replace('```', '').strip()
             return json.loads(clean_text)
-        return {"error": f"API Error {response.status_code}"}
+        return {"error": f"API Error {response.status_code} - Try switching models"}
     except Exception as e: return {"error": str(e)}
 
 def load_existing_signatures(csv_file):
@@ -110,7 +114,7 @@ def load_existing_signatures(csv_file):
         except: pass
     return signatures
 
-def process_and_save(files, mode, allow_duplicates):
+def process_and_save(files, mode, allow_duplicates, model_name):
     csv_file = FILE_INPUT if mode == "input" else FILE_OUTPUT
     entity_label = "Vendor" if mode == "input" else "Client"
     key_name = "vendor" if mode == "input" else "client"
@@ -121,16 +125,15 @@ def process_and_save(files, mode, allow_duplicates):
     progress_bar = st.progress(0)
     results = []
     skipped_files = []
-    failed_files = [] # 【V18】专门记录失败文件
+    failed_files = [] 
     
     for i, file in enumerate(files):
-        # 针对 Camera Input 没有名字的情况，生成一个临时名
         fname = getattr(file, 'name', f"Photo_{datetime.now().strftime('%H%M%S')}.jpg")
         
         try:
-            res = extract_invoice_data(file, mode=mode)
+            # 传入选择的模型
+            res = extract_invoice_data(file, mode=mode, model_choice=model_name)
             
-            # 【V18】检查 AI 是否返回了明确的错误
             if not isinstance(res, dict):
                 failed_files.append(f"{fname} (系统响应异常)")
                 continue
@@ -139,22 +142,19 @@ def process_and_save(files, mode, allow_duplicates):
                 failed_files.append(f"{fname} ({res['error']})")
                 continue
 
-            # 【V18】安全检查关键字段，防止 Key Error
             if "date" in res and ("total" in res or "subtotal" in res):
                 raw_inv_no = str(res.get("invoice_number", "UNKNOWN")).strip().upper()
                 raw_entity_name = str(res.get(key_name, "UNKNOWN")).strip().upper()
                 currency = str(res.get("currency", "ZAR")).upper()
 
-                # 【V18】安全数字转换，防止 Value Error (防崩溃核心)
                 try:
                     raw_subtotal = float(str(res.get("subtotal", 0)).replace(',', '').replace(' ', ''))
                     raw_vat = float(str(res.get("vat", 0)).replace(',', '').replace(' ', ''))
                     raw_total = float(str(res.get("total", 0)).replace(',', '').replace(' ', ''))
                 except:
-                    failed_files.append(f"{fname} (金额识别失败，请重拍)")
+                    failed_files.append(f"{fname} (金额识别失败)")
                     continue
 
-                # 查重逻辑
                 signature = (raw_inv_no, raw_total)
                 is_duplicate_history = signature in existing_signatures
                 is_duplicate_batch = signature in current_batch_signatures
@@ -189,30 +189,24 @@ def process_and_save(files, mode, allow_duplicates):
                     row["Total (USD)"] = ""; row["Exchange Rate"] = 1.0
                     if "DUPLICATE" not in row["Validation"]:
                         calc_total = round(row["Subtotal"] + row["VAT"], 2)
-                        # 放宽一点误差容忍度
-                        if abs(calc_total - row["Total"]) < 0.1: row["Validation"] = "✅ OK"
+                        if abs(calc_total - row["Total"]) < 0.15: row["Validation"] = "✅ OK"
                         else: row["Validation"] = "❌ Math Error"
                 
                 results.append(row)
                 current_batch_signatures.add(signature)
             else:
-                # 必须字段缺失
-                failed_files.append(f"{fname} (未识别到日期或金额)")
+                failed_files.append(f"{fname} (缺失关键字段)")
         
         except Exception as e:
-            # 最后的防线：捕获任何其他未知错误
             failed_files.append(f"{fname} (未知错误: {str(e)})")
 
         progress_bar.progress((i + 1) / len(files))
 
-    # 统一展示结果
     if skipped_files: st.toast(f"🚫 已跳过 {len(skipped_files)} 个重复文件", icon="🔕")
     
-    # 【V18】优雅地展示失败文件，不红屏
     if failed_files:
-        st.error(f"⚠️ 以下 {len(failed_files)} 个文件无法处理 (请确保照片清晰且为发票):")
-        for msg in failed_files:
-            st.text(f"• {msg}")
+        st.error(f"⚠️ 以下 {len(failed_files)} 个文件处理失败:")
+        for msg in failed_files: st.text(f"• {msg}")
 
     if results:
         st.toast(f"✅ 成功录入 {len(results)} 张新发票", icon="🎉")
@@ -261,14 +255,26 @@ with st.sidebar:
     st.metric("Total Revenue (Output)", f"R {tot_out:,.2f}", delta="+Rev")
     st.divider()
     st.metric("Net Profit", f"R {net_profit:,.2f}", delta_color="normal" if net_profit>=0 else "inverse")
+    
     st.markdown("---")
-    st.caption("System: OONCE v18.0 (Anti-Crash)")
+    st.markdown("### 🧠 AI Engine")
+    # 【V19】模型选择器
+    model_option = st.selectbox(
+        "Select Model",
+        ("gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"),
+        index=0,
+        help="Use 'Flash' for speed. Use 'Pro' for high accuracy on blurry/complex invoices."
+    )
+    st.caption(f"Active: {model_option}")
+    
+    st.markdown("---")
+    st.caption("System: OONCE v19.0 (Dual-Engine)")
 
 st.markdown("""
 <div class="brand-header">
     <div>
         <div class="brand-title">OONCE FINANCE</div>
-        <div class="brand-subtitle">Enterprise Edition | Mobile & Web</div>
+        <div class="brand-subtitle">Enterprise Edition | Intelligent Automation</div>
     </div>
     <div style="font-size:32px;">💎</div>
 </div>
@@ -293,7 +299,8 @@ with st.container(border=True):
             if cam_in: all_files_in.append(cam_in)
             
             if all_files_in:
-                process_and_save(all_files_in, "input", allow_dup_in)
+                # 传入选择的模型
+                process_and_save(all_files_in, "input", allow_dup_in, model_option)
             else:
                 st.warning("Please upload a file or take a photo.")
 
@@ -321,7 +328,7 @@ with st.container(border=True):
             if cam_out: all_files_out.append(cam_out)
             
             if all_files_out:
-                process_and_save(all_files_out, "output", allow_dup_out)
+                process_and_save(all_files_out, "output", allow_dup_out, model_option)
             else:
                 st.warning("Please upload a file or take a photo.")
 
