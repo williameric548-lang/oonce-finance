@@ -8,10 +8,13 @@ import time
 import yfinance as yf
 from datetime import datetime, timedelta
 
-# --- 1. 全局配置 ---
-# 厂长，为了保证您现在粘贴就能用，我先把 Key 写在这里。
-# 如果您已经在 Streamlit 后台配置了 Secrets，可以把下面这行改成: API_KEY = st.secrets["GEMINI_KEY"]
-API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
+# --- 1. 安全配置 (这是唯一的修改点) ---
+try:
+    # 从 Secrets 读取，绝不写死在代码里
+    API_KEY = st.secrets["GEMINI_KEY"].strip()
+except Exception:
+    st.error("🚨 未检测到 API Key！请在 Streamlit 后台 Settings -> Secrets 中配置 GEMINI_KEY。")
+    st.stop()
 
 FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
@@ -126,10 +129,8 @@ def load_existing_signatures(csv_file):
         try:
             df = pd.read_csv(csv_file)
             for _, row in df.iterrows():
-                # 1. 发票号去空格、转大写
                 inv_no = str(row.get('Invoice No', '')).strip().upper()
                 try: 
-                    # 2. 【核心修复】金额强制保留2位小数
                     raw_val = float(str(row.get('Total', 0)).replace(',', ''))
                     total = round(raw_val, 2)
                 except: 
@@ -152,202 +153,4 @@ def process_and_save(files, mode, allow_duplicates):
     failed_files = [] 
     
     for i, file in enumerate(files):
-        fname = getattr(file, 'name', f"Photo_{datetime.now().strftime('%H%M%S')}.jpg")
-        
-        try:
-            res = extract_invoice_data(file, mode=mode)
-            
-            if not isinstance(res, dict):
-                failed_files.append(f"{fname} (系统响应异常)")
-                continue
-                
-            if "error" in res:
-                failed_files.append(f"{fname} ({res['error']})")
-                continue
-
-            if "date" in res and ("total" in res or "subtotal" in res):
-                raw_inv_no = str(res.get("invoice_number", "UNKNOWN")).strip().upper()
-                raw_entity_name = str(res.get(key_name, "UNKNOWN")).strip().upper()
-                currency = str(res.get("currency", "ZAR")).upper()
-
-                try:
-                    # 3. 【核心修复】新读取的数据也强制保留2位小数
-                    raw_subtotal = round(float(str(res.get("subtotal", 0)).replace(',', '').replace(' ', '')), 2)
-                    raw_vat = round(float(str(res.get("vat", 0)).replace(',', '').replace(' ', '')), 2)
-                    raw_total = round(float(str(res.get("total", 0)).replace(',', '').replace(' ', '')), 2)
-                except:
-                    failed_files.append(f"{fname} (金额识别失败)")
-                    continue
-
-                # 4. 指纹比对
-                signature = (raw_inv_no, raw_total)
-                is_duplicate_history = signature in existing_signatures
-                is_duplicate_batch = signature in current_batch_signatures
-                
-                if (is_duplicate_history or is_duplicate_batch) and not allow_duplicates:
-                    skipped_files.append(f"{fname}")
-                    continue
-                
-                row = {
-                    "Date": res.get("date"), 
-                    "Invoice No": raw_inv_no,       
-                    entity_label: raw_entity_name,  
-                    "Currency": currency,           
-                    "Subtotal": raw_subtotal, 
-                    "VAT": raw_vat, 
-                    "Total": raw_total,
-                    "Total (USD)": "", "Exchange Rate": 1.0, 
-                    "Validation": "", "File Name": fname
-                }
-                
-                if (is_duplicate_history or is_duplicate_batch) and allow_duplicates:
-                    row["Validation"] = "⚠️ DUPLICATE"
-                
-                if "USD" in currency:
-                    rate = get_historical_zar_rate(row["Date"])
-                    if not rate: rate = 1.0; row["Exchange Rate"] = "Error"
-                    else: row["Exchange Rate"] = round(rate, 4)
-                    
-                    converted_val = round(raw_subtotal * (rate if isinstance(rate, float) else 0), 2)
-                    row["Subtotal"] = converted_val; row["VAT"] = 0.0; row["Total"] = converted_val
-                    row["Total (USD)"] = raw_subtotal
-                    
-                    if "DUPLICATE" not in row["Validation"]: row["Validation"] = "✅ USD Auto"
-                else:
-                    row["Subtotal"] = raw_subtotal; row["VAT"] = raw_vat; row["Total"] = raw_total
-                    row["Total (USD)"] = ""; row["Exchange Rate"] = 1.0
-                    
-                    if "DUPLICATE" not in row["Validation"]:
-                        calc_total = round(row["Subtotal"] + row["VAT"], 2)
-                        if abs(calc_total - row["Total"]) < 0.2: row["Validation"] = "✅ OK"
-                        else: row["Validation"] = "❌ Math Error"
-                
-                results.append(row)
-                current_batch_signatures.add(signature)
-            else:
-                failed_files.append(f"{fname} (缺失关键字段)")
-        
-        except Exception as e:
-            failed_files.append(f"{fname} (未知错误: {str(e)})")
-
-        progress_bar.progress((i + 1) / len(files))
-
-    if skipped_files: st.toast(f"🚫 已跳过 {len(skipped_files)} 个重复文件", icon="🔕")
-    
-    if failed_files:
-        st.error(f"⚠️ 以下 {len(failed_files)} 个文件处理失败:")
-        for msg in failed_files: st.text(f"• {msg}")
-
-    if results:
-        st.toast(f"✅ 成功录入 {len(results)} 张新发票", icon="🎉")
-        df = pd.DataFrame(results)
-        core_cols = ["Date", "Invoice No", entity_label, "Subtotal", "VAT", "Total", "Currency"]
-        extra_cols = ["Validation", "File Name", "Total (USD)", "Exchange Rate"]
-        df = df[core_cols + extra_cols]
-        if os.path.exists(csv_file): df.to_csv(csv_file, mode='a', header=False, index=False, encoding='utf-8-sig')
-        else: df.to_csv(csv_file, mode='w', header=True, index=False, encoding='utf-8-sig')
-        time.sleep(1)
-        st.rerun()
-
-def show_interactive_table(mode):
-    csv_file = FILE_INPUT if mode == "input" else FILE_OUTPUT
-    if os.path.exists(csv_file):
-        df = pd.read_csv(csv_file)
-        edited_df = st.data_editor(
-            df, key=f"editor_{mode}", num_rows="dynamic", use_container_width=True, hide_index=True,
-            column_config={"Validation": st.column_config.TextColumn("Status")}
-        )
-        if not df.equals(edited_df):
-            if st.button(f"💾 Save Changes", key=f"save_{mode}"):
-                edited_df.to_csv(csv_file, index=False, encoding='utf-8-sig')
-                st.success("Saved!")
-                time.sleep(1); st.rerun()
-        st.download_button(f"📥 Download CSV", df.to_csv(index=False).encode('utf-8-sig'), f"OONCE_{mode.upper()}.csv")
-    else: st.info("No records.")
-
-def calculate_metrics():
-    total_in = 0.0; total_out = 0.0
-    if os.path.exists(FILE_INPUT):
-        try: total_in = pd.read_csv(FILE_INPUT)['Total'].sum()
-        except: pass
-    if os.path.exists(FILE_OUTPUT):
-        try: total_out = pd.read_csv(FILE_OUTPUT)['Total'].sum()
-        except: pass
-    return total_in, total_out
-
-# --- 4. 页面布局 ---
-
-with st.sidebar:
-    st.markdown("### 📊 Dashboard")
-    tot_in, tot_out = calculate_metrics()
-    net_profit = tot_out - tot_in
-    st.metric("Total Cost (Input)", f"R {tot_in:,.2f}", delta="-Cost", delta_color="inverse")
-    st.metric("Total Revenue (Output)", f"R {tot_out:,.2f}", delta="+Rev")
-    st.divider()
-    st.metric("Net Profit", f"R {net_profit:,.2f}", delta_color="normal" if net_profit>=0 else "inverse")
-    st.markdown("---")
-    st.caption("System: OONCE v24.0 (Duplicate Fix)")
-
-st.markdown("""
-<div class="brand-header">
-    <div>
-        <div class="brand-title">OONCE FINANCE</div>
-        <div class="brand-subtitle">Enterprise Edition | Intelligent Automation</div>
-    </div>
-    <div style="font-size:32px;">💎</div>
-</div>
-""", unsafe_allow_html=True)
-
-# 板块 1: INPUT
-with st.container(border=True): 
-    st.markdown("### 📥 Input Invoices (Cost)")
-    c1, c2 = st.columns([3, 1])
-    with c1: 
-        files_in_upload = st.file_uploader("Upload Files (PDF/Image)", accept_multiple_files=True, key="in_up")
-        with st.expander("📸 Take a Photo (Camera)"):
-            cam_in = st.camera_input("Snap Invoice", key="cam_in")
-            
-    with c2: 
-        st.write(""); st.write("")
-        allow_dup_in = st.checkbox("Allow Duplicates", value=False, key="dup_in")
-        
-        if st.button("Process Input", key="btn_in"):
-            all_files_in = []
-            if files_in_upload: all_files_in.extend(files_in_upload)
-            if cam_in: all_files_in.append(cam_in)
-            
-            if all_files_in:
-                process_and_save(all_files_in, "input", allow_dup_in)
-            else:
-                st.warning("Please upload a file or take a photo.")
-
-    st.markdown("---")
-    show_interactive_table("input")
-
-st.write("")
-
-# 板块 2: OUTPUT
-with st.container(border=True):
-    st.markdown("### 📤 Output Invoices (Revenue)")
-    c1, c2 = st.columns([3, 1])
-    with c1: 
-        files_out_upload = st.file_uploader("Upload Files (PDF/Image)", accept_multiple_files=True, key="out_up")
-        with st.expander("📸 Take a Photo (Camera)"):
-            cam_out = st.camera_input("Snap Invoice", key="cam_out")
-            
-    with c2: 
-        st.write(""); st.write("")
-        allow_dup_out = st.checkbox("Allow Duplicates", value=False, key="dup_out")
-        
-        if st.button("Process Output", key="btn_out"):
-            all_files_out = []
-            if files_out_upload: all_files_out.extend(files_out_upload)
-            if cam_out: all_files_out.append(cam_out)
-            
-            if all_files_out:
-                process_and_save(all_files_out, "output", allow_dup_out)
-            else:
-                st.warning("Please upload a file or take a photo.")
-
-    st.markdown("---")
-    show_interactive_table("output")
+        fname = getattr(file, 'name', f"Photo_{datetime.now().strftime
