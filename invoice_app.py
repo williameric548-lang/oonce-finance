@@ -71,13 +71,17 @@ def extract_invoice_data(uploaded_file, mode="input"):
     target_entity = "Vendor/Supplier Name" if mode == "input" else "Client/Customer Name"
     entity_key = "vendor" if mode == "input" else "client"
     
+    # 【V18 更新 Prompt】: 教会 AI 识别无效图片
     prompt = f"""
-    Extract invoice data into JSON.
-    Fields required: "date" (YYYY-MM-DD), "invoice_number", "{entity_key}", "subtotal", "vat", "total", "currency".
-    Rules: 
-    1. If this image is NOT an invoice (e.g. selfie, landscape, blurry), return JSON: {{"error": "Not an invoice"}}.
-    2. If no VAT shown, set "vat": 0. 
-    3. Return pure numbers. If currency is Dollars, return "USD".
+    You are a professional invoice OCR system. Extract data into JSON.
+    
+    CRITICAL RULES:
+    1. If the image is NOT an invoice (e.g. selfie, person, landscape, blurry text, random object), return strictly: {{"error": "Not an invoice"}}.
+    2. If the image is an invoice but too blurry to read numbers, return: {{"error": "Blurry image"}}.
+    3. Fields required: "date" (YYYY-MM-DD), "invoice_number", "{entity_key}", "subtotal", "vat", "total", "currency".
+    4. "invoice_number": Extract the main identifier. If missing, return "UNKNOWN".
+    5. "vat": If not shown, set to 0.
+    6. Return pure numbers for amounts. If currency is Dollars, return "USD".
     """
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
@@ -88,7 +92,6 @@ def extract_invoice_data(uploaded_file, mode="input"):
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if response.status_code == 200:
             text = response.json()['candidates'][0]['content']['parts'][0]['text']
-            # 尝试清洗 markdown 标记
             clean_text = text.replace('```json', '').replace('```', '').strip()
             return json.loads(clean_text)
         return {"error": f"API Error {response.status_code}"}
@@ -118,32 +121,37 @@ def process_and_save(files, mode, allow_duplicates):
     progress_bar = st.progress(0)
     results = []
     skipped_files = []
-    failed_files = [] # 【V18新增】记录识别失败的文件
+    failed_files = [] # 【V18】专门记录失败文件
     
     for i, file in enumerate(files):
+        # 针对 Camera Input 没有名字的情况，生成一个临时名
         fname = getattr(file, 'name', f"Photo_{datetime.now().strftime('%H%M%S')}.jpg")
         
         try:
             res = extract_invoice_data(file, mode=mode)
             
-            # 【V18修复】: 检查 API 是否返回了错误，或者不是字典
-            if not isinstance(res, dict) or "error" in res or "Error" in res:
-                failed_files.append(f"{fname} (无法识别/Not an invoice)")
+            # 【V18】检查 AI 是否返回了明确的错误
+            if not isinstance(res, dict):
+                failed_files.append(f"{fname} (系统响应异常)")
+                continue
+                
+            if "error" in res:
+                failed_files.append(f"{fname} ({res['error']})")
                 continue
 
-            # 【V18修复】: 严格检查必要字段，防止 crash
+            # 【V18】安全检查关键字段，防止 Key Error
             if "date" in res and ("total" in res or "subtotal" in res):
-                raw_inv_no = str(res.get("invoice_number", "")).strip().upper()
-                raw_entity_name = str(res.get(key_name, "")).strip().upper()
+                raw_inv_no = str(res.get("invoice_number", "UNKNOWN")).strip().upper()
+                raw_entity_name = str(res.get(key_name, "UNKNOWN")).strip().upper()
                 currency = str(res.get("currency", "ZAR")).upper()
 
-                # 安全转换数字
+                # 【V18】安全数字转换，防止 Value Error (防崩溃核心)
                 try:
-                    raw_subtotal = float(str(res.get("subtotal", 0)).replace(',', ''))
-                    raw_vat = float(str(res.get("vat", 0)).replace(',', ''))
-                    raw_total = float(str(res.get("total", 0)).replace(',', ''))
-                except ValueError:
-                    failed_files.append(f"{fname} (金额格式错误)")
+                    raw_subtotal = float(str(res.get("subtotal", 0)).replace(',', '').replace(' ', ''))
+                    raw_vat = float(str(res.get("vat", 0)).replace(',', '').replace(' ', ''))
+                    raw_total = float(str(res.get("total", 0)).replace(',', '').replace(' ', ''))
+                except:
+                    failed_files.append(f"{fname} (金额识别失败，请重拍)")
                     continue
 
                 # 查重逻辑
@@ -181,32 +189,33 @@ def process_and_save(files, mode, allow_duplicates):
                     row["Total (USD)"] = ""; row["Exchange Rate"] = 1.0
                     if "DUPLICATE" not in row["Validation"]:
                         calc_total = round(row["Subtotal"] + row["VAT"], 2)
-                        if abs(calc_total - row["Total"]) < 0.05: row["Validation"] = "✅ OK"
+                        # 放宽一点误差容忍度
+                        if abs(calc_total - row["Total"]) < 0.1: row["Validation"] = "✅ OK"
                         else: row["Validation"] = "❌ Math Error"
                 
                 results.append(row)
                 current_batch_signatures.add(signature)
             else:
-                # 即使返回了JSON，但没有关键字段
-                failed_files.append(f"{fname} (缺失关键信息)")
+                # 必须字段缺失
+                failed_files.append(f"{fname} (未识别到日期或金额)")
         
         except Exception as e:
-            # 捕获所有未知异常，防止系统崩溃
-            failed_files.append(f"{fname} (系统错误: {str(e)})")
+            # 最后的防线：捕获任何其他未知错误
+            failed_files.append(f"{fname} (未知错误: {str(e)})")
 
         progress_bar.progress((i + 1) / len(files))
 
-    # 统一展示处理结果
-    if skipped_files: st.toast(f"🚫 Skipped {len(skipped_files)} duplicates", icon="🔕")
+    # 统一展示结果
+    if skipped_files: st.toast(f"🚫 已跳过 {len(skipped_files)} 个重复文件", icon="🔕")
     
-    # 【V18新增】: 展示失败的文件，但不报错
+    # 【V18】优雅地展示失败文件，不红屏
     if failed_files:
-        st.error(f"⚠️ 无法处理以下 {len(failed_files)} 个文件 (请检查是否为清晰发票图片):")
-        for f in failed_files:
-            st.write(f"- {f}")
+        st.error(f"⚠️ 以下 {len(failed_files)} 个文件无法处理 (请确保照片清晰且为发票):")
+        for msg in failed_files:
+            st.text(f"• {msg}")
 
     if results:
-        st.toast(f"✅ Processed {len(results)} new files", icon="🎉")
+        st.toast(f"✅ 成功录入 {len(results)} 张新发票", icon="🎉")
         df = pd.DataFrame(results)
         core_cols = ["Date", "Invoice No", entity_label, "Subtotal", "VAT", "Total", "Currency"]
         extra_cols = ["Validation", "File Name", "Total (USD)", "Exchange Rate"]
