@@ -8,7 +8,7 @@ import re
 import yfinance as yf
 
 # --- 1. 配置区域 ---
-API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
+API_KEY = st.secrets["GEMINI_KEY"]
 
 # 设置页面
 st.set_page_config(page_title="Import Master AI", layout="wide", page_icon="🇿🇦")
