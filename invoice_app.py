@@ -9,7 +9,6 @@ import yfinance as yf
 from datetime import datetime, timedelta
 
 # --- 1. 全局配置 ---
-# 注意：API Key 需要支持你选择的模型
 API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
 FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
@@ -50,9 +49,6 @@ def get_historical_zar_rate(date_str):
     except: return None
 
 def extract_invoice_data(uploaded_file, mode="input", model_choice="gemini-1.5-flash"):
-    """
-    V19 更新：接收 model_choice 参数，允许用户切换更强的模型
-    """
     mime_type = "image/jpeg"
     if hasattr(uploaded_file, 'name') and uploaded_file.name.lower().endswith('.pdf'): 
         mime_type = "application/pdf"
@@ -63,7 +59,6 @@ def extract_invoice_data(uploaded_file, mode="input", model_choice="gemini-1.5-f
     target_entity = "Vendor/Supplier Name" if mode == "input" else "Client/Customer Name"
     entity_key = "vendor" if mode == "input" else "client"
     
-    # 强化版 Prompt，专门针对金额识别
     prompt = f"""
     You are an expert financial auditor OCR system. 
     Task: Extract invoice data into JSON.
@@ -87,18 +82,21 @@ def extract_invoice_data(uploaded_file, mode="input", model_choice="gemini-1.5-f
     }}
     """
     
-    # 动态使用用户选择的模型
+    # 这里的 URL 是关键，只使用稳定版模型
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_choice}:generateContent?key={API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
 
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=120) # 延长超时时间给 Pro 模型
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=120)
         if response.status_code == 200:
             text = response.json()['candidates'][0]['content']['parts'][0]['text']
             clean_text = text.replace('```json', '').replace('```', '').strip()
             return json.loads(clean_text)
-        return {"error": f"API Error {response.status_code} - Try switching models"}
+        elif response.status_code == 404:
+            return {"error": f"Model '{model_choice}' not found (404). Please switch models in Sidebar."}
+        else:
+            return {"error": f"API Error {response.status_code}"}
     except Exception as e: return {"error": str(e)}
 
 def load_existing_signatures(csv_file):
@@ -131,7 +129,6 @@ def process_and_save(files, mode, allow_duplicates, model_name):
         fname = getattr(file, 'name', f"Photo_{datetime.now().strftime('%H%M%S')}.jpg")
         
         try:
-            # 传入选择的模型
             res = extract_invoice_data(file, mode=mode, model_choice=model_name)
             
             if not isinstance(res, dict):
@@ -258,17 +255,18 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 🧠 AI Engine")
-    # 【V19】模型选择器
+    
+    # 【V20 修复】只保留最稳定的两个模型，去除不稳定的 2.0
     model_option = st.selectbox(
         "Select Model",
-        ("gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash"),
+        ("gemini-1.5-flash", "gemini-1.5-pro"),
         index=0,
-        help="Use 'Flash' for speed. Use 'Pro' for high accuracy on blurry/complex invoices."
+        help="Use 'Flash' for speed (Default). Use 'Pro' if accuracy is low."
     )
     st.caption(f"Active: {model_option}")
     
     st.markdown("---")
-    st.caption("System: OONCE v19.0 (Dual-Engine)")
+    st.caption("System: OONCE v20.0 (Stable)")
 
 st.markdown("""
 <div class="brand-header">
@@ -299,7 +297,6 @@ with st.container(border=True):
             if cam_in: all_files_in.append(cam_in)
             
             if all_files_in:
-                # 传入选择的模型
                 process_and_save(all_files_in, "input", allow_dup_in, model_option)
             else:
                 st.warning("Please upload a file or take a photo.")
