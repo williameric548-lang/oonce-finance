@@ -6,9 +6,9 @@ import math
 import base64
 import re
 
-# --- 1. 安全配置 (容错版) ---
+# --- 1. 安全配置 (自动清洗空格) ---
 try:
-    # .strip() 是关键！它会自动切除 Key 前后的空格和换行符
+    # 自动去掉可能多复制的空格
     API_KEY = st.secrets["GEMINI_KEY"].strip()
 except Exception:
     st.error("🚨 未检测到 API Key！请在 Streamlit 后台 Settings -> Secrets 中配置 GEMINI_KEY。")
@@ -40,11 +40,37 @@ st.markdown("""
 # --- 3. 核心逻辑 ---
 
 def get_available_model():
-    # 始终使用 flash 模型，速度快且稳定
-    return "gemini-1.5-flash"
+    """
+    自动雷达：询问 API 到底有哪些模型可用，避免 404 错误。
+    """
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            # 策略 1: 优先找 Flash (速度快)
+            for model in data.get('models', []):
+                name = model['name'].replace('models/', '')
+                if 'flash' in name and 'generateContent' in model.get('supportedGenerationMethods', []):
+                    return name
+            # 策略 2: 其次找 Pro (能力强)
+            for model in data.get('models', []):
+                name = model['name'].replace('models/', '')
+                if 'pro' in name and 'generateContent' in model.get('supportedGenerationMethods', []):
+                    return name
+            # 策略 3: 有啥用啥 (兜底)
+            for model in data.get('models', []):
+                if 'generateContent' in model.get('supportedGenerationMethods', []):
+                    return model['name'].replace('models/', '')
+    except:
+        pass
+    # 如果雷达失效，最后试一次 gemini-pro (最通用的老版本)
+    return "gemini-pro"
 
 def analyze_project_list(uploaded_file):
+    # 动态获取模型，不再写死
     model_name = get_available_model()
+    
     file_ext = uploaded_file.name.lower().split('.')[-1]
     
     prompt_base = """
@@ -64,9 +90,7 @@ def analyze_project_list(uploaded_file):
     if file_ext in ['xlsx', 'xls']:
         try:
             df = pd.read_excel(uploaded_file)
-            # 处理空表格的情况
             if df.empty: return [], "Excel is empty."
-            # 处理 NaN (空值)，防止 JSON 解析报错
             df = df.fillna("")
             excel_text = df.to_string(index=False)
             payload = {"contents": [{"parts": [{"text": prompt_base + f"\nData:\n{excel_text}"}]}]}
@@ -85,18 +109,16 @@ def analyze_project_list(uploaded_file):
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if response.status_code == 200:
             res_json = response.json()
-            if 'candidates' not in res_json: return [], "No content returned from AI"
+            if 'candidates' not in res_json: return [], "No content returned (Safety Block?)"
             text = res_json['candidates'][0]['content']['parts'][0]['text']
             match = re.search(r'\[.*\]', text, re.DOTALL)
             if match: return json.loads(match.group(0)), None
             else: return [], text
         else:
-            # 【关键修改】打印出具体的错误信息，不再只显示 400
-            return [], f"API Error {response.status_code}: {response.text}"
+            return [], f"API Error {response.status_code} (Model: {model_name}): {response.text}"
     except Exception as e: return [], str(e)
 
 def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin):
-    # 确保数值转换安全
     for col in ['quantity', 'china_price', 'sa_price', 'weight_kg', 'volume_m3']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
@@ -111,7 +133,6 @@ def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
     total_weight = (df['quantity'] * df['weight_kg']).sum()
     total_volume = (df['quantity'] * df['volume_m3']).sum()
     
-    # 防止除以零错误
     truck_cap_vol = 108.0 * 0.9
     num_trucks = math.ceil(max(total_weight / 34000.0, total_volume / truck_cap_vol))
     if num_trucks < 1: num_trucks = 1
@@ -133,7 +154,7 @@ def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
 
 st.markdown("""
 <div class="header-box">
-    <h2>🏗️ Project Quoter V3.3 (Debug Edition)</h2>
+    <h2>🏗️ Project Quoter V3.4 (Auto-Radar Edition)</h2>
 </div>
 """, unsafe_allow_html=True)
 
@@ -152,15 +173,14 @@ with col1:
     uploaded_file = st.file_uploader("Upload Excel/Image/PDF", type=['xlsx', 'xls', 'png', 'jpg', 'pdf'])
     
     if uploaded_file and st.button("🚀 Analyze & Quote"):
-        with st.spinner("AI is Calculating..."):
+        with st.spinner("AI is finding best model & calculating..."):
             raw_data, err = analyze_project_list(uploaded_file)
             if raw_data:
                 st.session_state['project_data'] = pd.DataFrame(raw_data)
                 st.success("Done!")
             else:
                 st.error("Failed")
-                # 这里会显示红色的详细错误信息，帮我们彻底破案
-                if err: st.code(err, language='json')
+                if err: st.code(err)
 
 if 'project_data' in st.session_state:
     df = st.session_state['project_data']
