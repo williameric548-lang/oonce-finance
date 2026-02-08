@@ -13,10 +13,10 @@ API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
 FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
 
-# 设置页面: 换个更专业的图标 (Building Construction)
-st.set_page_config(page_title="OONCE Finance System", layout="wide", page_icon="🏗️")
+# 设置页面: 图标改为"增长趋势"，去除工厂属性
+st.set_page_config(page_title="OONCE Finance", layout="wide", page_icon="📈")
 
-# --- 2. 企业级 CSS 美化 ---
+# --- 2. CSS 美化 (独立品牌风格) ---
 st.markdown("""
 <style>
     /* 全局背景微调 */
@@ -24,28 +24,31 @@ st.markdown("""
         background-color: #f8f9fa;
     }
     
-    /* 顶部品牌条样式 */
+    /* 顶部品牌条样式 - 纯粹的 OONCE 蓝 */
     .brand-header {
-        background: linear-gradient(90deg, #1E3A8A 0%, #2563EB 100%); /* 深蓝渐变 */
-        padding: 20px;
-        border-radius: 10px;
+        background: linear-gradient(135deg, #0F2027 0%, #203A43 50%, #2C5364 100%); /* 深邃黑蓝渐变 */
+        padding: 25px;
+        border-radius: 12px;
         color: white;
         margin-bottom: 25px;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
     }
     .brand-title {
         font-family: 'Helvetica Neue', sans-serif;
-        font-size: 24px;
+        font-size: 28px;
         font-weight: 800;
-        letter-spacing: 1px;
+        letter-spacing: 2px;
+        color: #ffffff;
     }
     .brand-subtitle {
         font-size: 14px;
-        opacity: 0.9;
+        opacity: 0.8;
         font-weight: 400;
+        margin-top: 5px;
+        letter-spacing: 1px;
     }
 
     /* 侧边栏美化 */
@@ -54,9 +57,9 @@ st.markdown("""
         border-right: 1px solid #e5e7eb;
     }
     
-    /* 绿色按钮 (更深沉的金融绿) */
+    /* 按钮样式 (保持专业的绿色) */
     div.stButton > button {
-        background-color: #059669; /* Emerald 600 */
+        background-color: #059669; 
         color: white;
         border-radius: 6px;
         border: none;
@@ -76,10 +79,9 @@ st.markdown("""
         border: 1px solid #e5e7eb;
         box-shadow: 0 1px 3px rgba(0,0,0,0.05);
         padding: 20px;
-        border-top: 4px solid #059669 !important; /* 顶部绿条 */
+        border-top: 4px solid #059669 !important;
     }
     
-    /* 修正表格字体 */
     .stDataFrame { font-size: 14px; }
 </style>
 """, unsafe_allow_html=True)
@@ -242,10 +244,9 @@ def calculate_metrics():
 
 # --- 4. 页面布局 ---
 
-# === 侧边栏 (Sidebar) - 仪表盘与设置 ===
+# === 侧边栏 (Sidebar) ===
 with st.sidebar:
-    st.image("https://img.icons8.com/?size=100&id=12781&format=png", width=60) # 一个简约的图表图标
-    st.markdown("### Dashboard")
+    st.markdown("### 📊 Dashboard")
     
     tot_in, tot_out = calculate_metrics()
     net_profit = tot_out - tot_in
@@ -256,24 +257,23 @@ with st.sidebar:
     st.metric("Net Profit", f"R {net_profit:,.2f}", delta_color="normal" if net_profit>=0 else "inverse")
     
     st.markdown("---")
-    st.markdown("### Settings")
+    st.markdown("### ⚙️ Settings")
     allow_dup_in = st.checkbox("Allow Duplicates (Input)", value=False)
     allow_dup_out = st.checkbox("Allow Duplicates (Output)", value=False)
     
     st.markdown("---")
-    st.caption(f"API Model: Gemini 1.5 Flash")
-    st.caption("Powered by OONCE Tech")
+    st.caption("System: OONCE v13.0")
 
 # === 主区域 (Main) ===
 
-# 品牌 Header
+# 独立品牌 Header
 st.markdown("""
 <div class="brand-header">
     <div>
         <div class="brand-title">OONCE FINANCE</div>
-        <div class="brand-subtitle">Great Wall Steel | Intelligent Ledger</div>
+        <div class="brand-subtitle">Enterprise Edition | Intelligent Automation</div>
     </div>
-    <div style="font-size:30px;">🏭</div>
+    <div style="font-size:32px;">💎</div>
 </div>
 """, unsafe_allow_html=True)
 
