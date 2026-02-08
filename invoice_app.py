@@ -12,8 +12,6 @@ from datetime import datetime, timedelta
 API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
 FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
-# 强制锁定最稳定的模型
-MODEL_NAME = "gemini-1.5-flash"
 
 # 设置页面
 st.set_page_config(page_title="OONCE Finance", layout="wide", page_icon="📈")
@@ -40,6 +38,27 @@ st.markdown("""
 
 # --- 3. 核心逻辑 ---
 
+# 【V23 核心回归】: 自动寻找可用的模型，不再写死
+def get_available_model():
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            # 优先寻找 flash 模型，因为它快
+            for model in data.get('models', []):
+                name = model['name'].replace('models/', '')
+                if 'flash' in name and 'generateContent' in model.get('supportedGenerationMethods', []):
+                    return name
+            # 如果没有 flash，随便找一个能用的 Pro
+            for model in data.get('models', []):
+                if 'generateContent' in model.get('supportedGenerationMethods', []):
+                    return model['name'].replace('models/', '')
+    except:
+        pass
+    # 如果自动寻找失败，才使用兜底方案
+    return "gemini-1.5-flash"
+
 def get_historical_zar_rate(date_str):
     try:
         inv_date = datetime.strptime(date_str, "%Y-%m-%d")
@@ -51,6 +70,9 @@ def get_historical_zar_rate(date_str):
     except: return None
 
 def extract_invoice_data(uploaded_file, mode="input"):
+    # 动态获取模型
+    model_name = get_available_model()
+    
     mime_type = "image/jpeg"
     if hasattr(uploaded_file, 'name') and uploaded_file.name.lower().endswith('.pdf'): 
         mime_type = "application/pdf"
@@ -61,7 +83,6 @@ def extract_invoice_data(uploaded_file, mode="input"):
     target_entity = "Vendor/Supplier Name" if mode == "input" else "Client/Customer Name"
     entity_key = "vendor" if mode == "input" else "client"
     
-    # 使用加强版的 Prompt，但配合稳定的模型
     prompt = f"""
     You are an expert financial auditor OCR system. 
     Task: Extract invoice data into JSON.
@@ -85,8 +106,7 @@ def extract_invoice_data(uploaded_file, mode="input"):
     }}
     """
     
-    # 恢复为最简单的调用方式
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
 
@@ -97,7 +117,7 @@ def extract_invoice_data(uploaded_file, mode="input"):
             clean_text = text.replace('```json', '').replace('```', '').strip()
             return json.loads(clean_text)
         else:
-            return {"error": f"API Error {response.status_code}"}
+            return {"error": f"API Error {response.status_code} (Model: {model_name})"}
     except Exception as e: return {"error": str(e)}
 
 def load_existing_signatures(csv_file):
@@ -132,7 +152,6 @@ def process_and_save(files, mode, allow_duplicates):
         try:
             res = extract_invoice_data(file, mode=mode)
             
-            # V18 防崩溃逻辑
             if not isinstance(res, dict):
                 failed_files.append(f"{fname} (系统响应异常)")
                 continue
@@ -188,7 +207,7 @@ def process_and_save(files, mode, allow_duplicates):
                     row["Total (USD)"] = ""; row["Exchange Rate"] = 1.0
                     if "DUPLICATE" not in row["Validation"]:
                         calc_total = round(row["Subtotal"] + row["VAT"], 2)
-                        # V19 优化: 适当放宽校验误差，避免1分钱报错
+                        # V19 优化: 适当放宽校验误差
                         if abs(calc_total - row["Total"]) < 0.15: row["Validation"] = "✅ OK"
                         else: row["Validation"] = "❌ Math Error"
                 
@@ -256,7 +275,7 @@ with st.sidebar:
     st.divider()
     st.metric("Net Profit", f"R {net_profit:,.2f}", delta_color="normal" if net_profit>=0 else "inverse")
     st.markdown("---")
-    st.caption("System: OONCE v22.0 (Classic Stable)")
+    st.caption("System: OONCE v23.0 (Auto-Fix)")
 
 st.markdown("""
 <div class="brand-header">
