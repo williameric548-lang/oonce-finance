@@ -7,8 +7,10 @@ import base64
 import re
 
 # --- 1. 全局配置 ---
-try:
-    API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
+# 厂长，为了彻底解决 403 问题，我在这里直接把 Key 写好了。
+# 等后面如果不报错了，我们再考虑用 Secrets 隐藏它。
+API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
+
 st.set_page_config(page_title="Project Quoter", layout="wide", page_icon="🏗️")
 
 # --- 2. CSS 美化 ---
@@ -105,8 +107,7 @@ def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
     for col in ['quantity', 'china_price', 'sa_price', 'weight_kg', 'volume_m3']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # 2. 定价逻辑 (Strategy Price)
-    # 规则：如果有南非价用南非价，没有则用中国价 * 2.5 (china_markup)
+    # 2. 定价逻辑
     def get_strategy_price(row):
         if row['sa_price'] > 0:
             return row['sa_price']
@@ -115,12 +116,10 @@ def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
     
     df['base_price'] = df.apply(get_strategy_price, axis=1)
 
-    # 3. 利润加成 (Final Quote)
-    # 规则：在基础策略价之上，再加 profit_margin (比如 30%)
-    # 公式：Quote = Base * (1 + 30%)
+    # 3. 利润加成
     df['final_unit_price'] = df['base_price'] * (1 + profit_margin / 100.0)
     
-    # 4. 计算小计 (Subtotal)
+    # 4. 计算小计
     df['subtotal_product'] = df['quantity'] * df['final_unit_price']
 
     # 5. 物流 (Superlink)
@@ -134,7 +133,6 @@ def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
     if num_trucks < 1: num_trucks = 1
     
     total_freight = num_trucks * (freight_rate * 34.0)
-    
     grand_total = df['subtotal_product'].sum() + total_freight
 
     summary = {
@@ -157,9 +155,8 @@ st.markdown("""
 
 with st.sidebar:
     st.header("💰 Pricing Strategy")
-    # 利润设置区
-    china_markup = st.number_input("China Markup Factor", value=2.5, step=0.1, help="无南非货时，中国价 x 倍数 (默认2.5)")
-    profit_margin = st.slider("Additional Profit Margin (%)", 0, 100, 30, help="最终报价额外加成 (默认30%)")
+    china_markup = st.number_input("China Markup Factor", value=2.5, step=0.1, help="无南非货时，中国价 x 倍数")
+    profit_margin = st.slider("Additional Profit Margin (%)", 0, 100, 30)
     
     st.divider()
     st.header("🚛 Logistics")
@@ -190,18 +187,18 @@ if 'project_data' in st.session_state:
     # 实时计算
     final_df, summary = calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
     
-    # 数据展示 (重点：配置了 Subtotal 和 Final Price 的显示)
+    # 数据展示
     edited_df = st.data_editor(
-        final_df, # 使用计算好的 final_df，而不是原始 df
+        final_df,
         column_config={
             "item": "Item",
             "spec": "Spec",
             "quantity": "Qty",
             "china_price": st.column_config.NumberColumn("China Cost", help="中国参考成本"),
             "sa_price": st.column_config.NumberColumn("SA Market", help="南非参考市价"),
-            "base_price": st.column_config.NumberColumn("Base ($)", disabled=True, help="策略基准价 (未加利润)"),
-            "final_unit_price": st.column_config.NumberColumn("Unit Quote ($)", format="$%.2f", disabled=True, help=f"含 {profit_margin}% 利润的报价"),
-            "subtotal_product": st.column_config.NumberColumn("Subtotal ($)", format="$%.2f", disabled=True), # 加上了小计
+            "base_price": st.column_config.NumberColumn("Base ($)", disabled=True, help="策略基准价"),
+            "final_unit_price": st.column_config.NumberColumn("Unit Quote ($)", format="$%.2f", disabled=True),
+            "subtotal_product": st.column_config.NumberColumn("Subtotal ($)", format="$%.2f", disabled=True),
             "weight_kg": st.column_config.NumberColumn("Kg", disabled=True),
             "volume_m3": st.column_config.NumberColumn("CBM", disabled=True),
         },
