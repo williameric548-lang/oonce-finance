@@ -4,10 +4,11 @@ from duckduckgo_search import DDGS
 import datetime
 import requests
 import json
+import re
 
 # --- 1. 安全配置 ---
 try:
-    # 自动清洗空格，防止 400 错误
+    # 自动清洗空格
     API_KEY = st.secrets["GEMINI_KEY"].strip()
 except Exception:
     st.error("🚨 未检测到 API Key！请配置 Secrets。")
@@ -29,28 +30,61 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. 核心逻辑 ---
+# --- 3. 核心逻辑 (自动寻路版) ---
+
+def get_available_model():
+    """
+    自动雷达：询问 API 到底有哪些模型可用，避免 404 错误。
+    """
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            # 策略 1: 优先找 Flash
+            for model in data.get('models', []):
+                name = model['name'].replace('models/', '')
+                if 'flash' in name and 'generateContent' in model.get('supportedGenerationMethods', []):
+                    return name
+            # 策略 2: 其次找 Pro
+            for model in data.get('models', []):
+                name = model['name'].replace('models/', '')
+                if 'pro' in name and 'generateContent' in model.get('supportedGenerationMethods', []):
+                    return name
+            # 策略 3: 有啥用啥
+            for model in data.get('models', []):
+                if 'generateContent' in model.get('supportedGenerationMethods', []):
+                    return model['name'].replace('models/', '')
+    except:
+        pass
+    return "gemini-pro" # 最后的兜底
 
 def get_gemini_response(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
+    # 动态获取模型，不再写死 flash
+    model_name = get_available_model()
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if response.status_code == 200:
-            return response.json()['candidates'][0]['content']['parts'][0]['text']
-    except: pass
-    return None
+            return response.json()['candidates'][0]['content']['parts'][0]['text'], None
+        else:
+            # 返回具体错误信息
+            return None, f"API Error {response.status_code} ({model_name}): {response.text}"
+    except Exception as e:
+        return None, str(e)
 
 def search_sa_news(topics):
     results = []
-    # 使用 DuckDuckGo 免费搜索
     try:
         ddgs = DDGS()
         for topic in topics:
             query = f"South Africa {topic} news latest"
             # 搜索最近一天的新闻
-            search_res = list(ddgs.news(keywords=query, region="za-en", timelimit="d", max_results=3))
+            search_res = list(ddgs.news(keywords=query, region="za-en", timelimit="d", max_results=2))
             for res in search_res:
                 results.append({
                     "topic": topic,
@@ -60,12 +94,12 @@ def search_sa_news(topics):
                     "url": res['url']
                 })
     except Exception as e:
-        st.error(f"Search Error: {e}")
+        st.error(f"News Search Error: {e}")
             
     return results
 
 def generate_wechat_article(news_items):
-    if not news_items: return None
+    if not news_items: return None, "没有新闻数据输入"
 
     news_text = ""
     for idx, item in enumerate(news_items):
@@ -78,11 +112,12 @@ def generate_wechat_article(news_items):
     
     Requirements:
     1. **Tone**: Urgent, helpful, slightly sensational (Shocking/Important). Use emojis.
-    2. **Structure**:
+    2. **Language**: Chinese (Simplified).
+    3. **Structure**:
        - **Catchy Title**: e.g. "Attention! New Home Affairs rule!".
        - **Intro**: Greetings, Exchange rate check.
        - **Body**: Translate core info to Chinese. Highlight impacts on Chinese people.
-       - **Fun**: Recommend a random popular SA dish if no food news.
+       - **Fun**: Recommend a random popular SA dish/spot if no food news.
     
     Input News Data:
     {news_text}
@@ -130,11 +165,17 @@ if 'news_data' in st.session_state:
     col1, col2 = st.columns([3, 1])
     with col1:
         if st.button("🚀 AI 撰写公众号文章"):
-            with st.spinner("✍️ Gemini 正在撰写..."):
-                article_content = generate_wechat_article(st.session_state['news_data'])
+            with st.spinner("✍️ Gemini 正在撰写... (请稍候 10-20秒)"):
+                # 调用 AI
+                article_content, err_msg = generate_wechat_article(st.session_state['news_data'])
+                
                 if article_content:
                     st.session_state['final_article'] = article_content
                     st.success("撰写完成！")
+                else:
+                    st.error("生成失败")
+                    if err_msg:
+                        st.code(err_msg, language="json")
 
 if 'final_article' in st.session_state:
     st.subheader("📱 公众号预览")
