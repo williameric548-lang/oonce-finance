@@ -6,10 +6,14 @@ import math
 import base64
 import re
 
-# --- 1. 全局配置 ---
-# 厂长，这是您的 API Key，我已经帮您写死在这里了。
-# 只要 Key 本身没过期，这行代码绝对不会报错。
-API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
+# --- 1. 安全配置 ---
+# 厂长，这次我们只从 Secrets 读取，绝对不写死在代码里！
+# 这样 GitHub 怎么扫描都扫不到，Google 就不会封您的号了。
+try:
+    API_KEY = st.secrets["GEMINI_KEY"]
+except Exception:
+    st.error("🚨 未检测到 API Key！请在 Streamlit 后台 Settings -> Secrets 中配置 GEMINI_KEY。")
+    st.stop()
 
 st.set_page_config(page_title="Project Quoter", layout="wide", page_icon="🏗️")
 
@@ -30,7 +34,6 @@ st.markdown("""
         background: white; padding: 15px; border-radius: 8px;
         border-left: 5px solid #2c3e50; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
-    /* 让表格里的 Total 更醒目 */
     div[data-testid="stDataFrame"] { width: 100%; }
 </style>
 """, unsafe_allow_html=True)
@@ -38,7 +41,6 @@ st.markdown("""
 # --- 3. 核心逻辑 ---
 
 def get_available_model():
-    # 既然是强制模式，我们先用最稳的 flash 模型试试，防止 Pro 模型没权限报 403
     return "gemini-1.5-flash"
 
 def analyze_project_list(uploaded_file):
@@ -48,12 +50,10 @@ def analyze_project_list(uploaded_file):
     prompt_base = """
     You are an expert Quantity Surveyor.
     Task: Analyze Project List.
-    
     Requirements:
     1. Extract: Item, Spec, Quantity.
     2. Price (USD): Estimate `china_price` and `sa_price` (0 if unavailable).
     3. Logistics: Estimate `weight_kg` and `volume_m3` per unit.
-    
     Output JSON ONLY:
     [
       {"item": "Item A", "spec": "Spec", "quantity": 10, "china_price": 5.0, "sa_price": 0, "weight_kg": 1, "volume_m3": 0.01}
@@ -61,14 +61,12 @@ def analyze_project_list(uploaded_file):
     """
 
     payload = {}
-    # 处理 Excel
     if file_ext in ['xlsx', 'xls']:
         try:
             df = pd.read_excel(uploaded_file)
             excel_text = df.to_string(index=False)
             payload = {"contents": [{"parts": [{"text": prompt_base + f"\nData:\n{excel_text}"}]}]}
         except Exception as e: return [], f"Excel Error: {str(e)}"
-    # 处理 图片/PDF
     else:
         mime_type = "image/jpeg"
         if file_ext == 'pdf': mime_type = "application/pdf"
@@ -83,7 +81,7 @@ def analyze_project_list(uploaded_file):
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if response.status_code == 200:
             res_json = response.json()
-            if 'candidates' not in res_json: return [], "No content returned from AI"
+            if 'candidates' not in res_json: return [], "No content returned"
             text = res_json['candidates'][0]['content']['parts'][0]['text']
             match = re.search(r'\[.*\]', text, re.DOTALL)
             if match: return json.loads(match.group(0)), None
@@ -92,33 +90,21 @@ def analyze_project_list(uploaded_file):
     except Exception as e: return [], str(e)
 
 def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin):
-    # 1. 基础清洗
     for col in ['quantity', 'china_price', 'sa_price', 'weight_kg', 'volume_m3']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # 2. 定价逻辑
     def get_strategy_price(row):
-        if row['sa_price'] > 0:
-            return row['sa_price']
-        else:
-            return row['china_price'] * china_markup
+        if row['sa_price'] > 0: return row['sa_price']
+        else: return row['china_price'] * china_markup
     
     df['base_price'] = df.apply(get_strategy_price, axis=1)
-
-    # 3. 利润加成
     df['final_unit_price'] = df['base_price'] * (1 + profit_margin / 100.0)
-    
-    # 4. 计算小计
     df['subtotal_product'] = df['quantity'] * df['final_unit_price']
 
-    # 5. 物流 (Superlink)
     total_weight = (df['quantity'] * df['weight_kg']).sum()
     total_volume = (df['quantity'] * df['volume_m3']).sum()
     
-    # 34吨 / 97方
-    req_weight = total_weight / 34000.0
-    req_vol = total_volume / (108.0 * 0.9)
-    num_trucks = math.ceil(max(req_weight, req_vol))
+    num_trucks = math.ceil(max(total_weight / 34000.0, total_volume / (108.0 * 0.9)))
     if num_trucks < 1: num_trucks = 1
     
     total_freight = num_trucks * (freight_rate * 34.0)
@@ -138,15 +124,14 @@ def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
 
 st.markdown("""
 <div class="header-box">
-    <h2>🏗️ Project Quoter V3.1 (Fix Edition)</h2>
+    <h2>🏗️ Project Quoter V3.2 (Secure Edition)</h2>
 </div>
 """, unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("💰 Pricing Strategy")
-    china_markup = st.number_input("China Markup Factor", value=2.5, step=0.1, help="无南非货时，中国价 x 倍数")
+    china_markup = st.number_input("China Markup Factor", value=2.5, step=0.1)
     profit_margin = st.slider("Additional Profit Margin (%)", 0, 100, 30)
-    
     st.divider()
     st.header("🚛 Logistics")
     freight_rate = st.number_input("Freight ($/Ton)", value=500.0)
@@ -169,44 +154,33 @@ with col1:
 
 if 'project_data' in st.session_state:
     df = st.session_state['project_data']
-    
     st.divider()
     st.subheader(f"🛠️ Quote Builder (Margin: {profit_margin}%)")
     
-    # 实时计算
     final_df, summary = calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
     
-    # 数据展示
     edited_df = st.data_editor(
         final_df,
         column_config={
-            "item": "Item",
-            "spec": "Spec",
-            "quantity": "Qty",
-            "china_price": st.column_config.NumberColumn("China Cost", help="中国参考成本"),
-            "sa_price": st.column_config.NumberColumn("SA Market", help="南非参考市价"),
-            "base_price": st.column_config.NumberColumn("Base ($)", disabled=True, help="策略基准价"),
+            "item": "Item", "spec": "Spec", "quantity": "Qty",
+            "china_price": st.column_config.NumberColumn("China Cost"),
+            "sa_price": st.column_config.NumberColumn("SA Market"),
+            "base_price": st.column_config.NumberColumn("Base ($)", disabled=True),
             "final_unit_price": st.column_config.NumberColumn("Unit Quote ($)", format="$%.2f", disabled=True),
             "subtotal_product": st.column_config.NumberColumn("Subtotal ($)", format="$%.2f", disabled=True),
             "weight_kg": st.column_config.NumberColumn("Kg", disabled=True),
             "volume_m3": st.column_config.NumberColumn("CBM", disabled=True),
         },
-        num_rows="dynamic",
-        use_container_width=True
+        num_rows="dynamic", use_container_width=True
     )
     
     st.divider()
-    
-    # 结果展示
     st.subheader("💰 Final Quotation Overview")
     
     c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(f"<div class='metric-box'><h4>Product Subtotal</h4><h2>${summary['total_product_value']:,.2f}</h2><p>含利润货值</p></div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown(f"<div class='metric-box'><h4>Freight Cost</h4><h2>${summary['total_freight']:,.2f}</h2><p>{int(summary['num_trucks'])}x Superlinks</p></div>", unsafe_allow_html=True)
-    with c3:
-        st.markdown(f"<div class='metric-box' style='border-left-color: #d32f2f;'><h4>Grand Total</h4><h2 style='color:#d32f2f'>${summary['grand_total']:,.2f}</h2><p>总报价</p></div>", unsafe_allow_html=True)
+    with c1: st.markdown(f"<div class='metric-box'><h4>Product Subtotal</h4><h2>${summary['total_product_value']:,.2f}</h2></div>", unsafe_allow_html=True)
+    with c2: st.markdown(f"<div class='metric-box'><h4>Freight Cost</h4><h2>${summary['total_freight']:,.2f}</h2><p>{int(summary['num_trucks'])}x Superlinks</p></div>", unsafe_allow_html=True)
+    with c3: st.markdown(f"<div class='metric-box' style='border-left-color: #d32f2f;'><h4>Grand Total</h4><h2 style='color:#d32f2f'>${summary['grand_total']:,.2f}</h2></div>", unsafe_allow_html=True)
 
     csv = final_df.to_csv(index=False).encode('utf-8')
     st.download_button("📄 Download Full Quote (CSV)", csv, "Project_Quote.csv")
