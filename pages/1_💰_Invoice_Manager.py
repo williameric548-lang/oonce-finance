@@ -7,7 +7,7 @@ import base64
 import re  # 新增正则库，用于清洗数据
 
 # --- 1. 配置区域 ---
-API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"  # 您的 Key
+API_KEY = st.secrets["GEMINI_KEY"]  # 您的 Key
 
 # 设置页面
 st.set_page_config(page_title="Import Master AI", layout="wide", page_icon="🚢")
