@@ -8,10 +8,7 @@ import re
 
 # --- 1. 全局配置 ---
 try:
-    API_KEY = st.secrets["GEMINI_KEY"]
-except:
     API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
-
 st.set_page_config(page_title="Project Quoter", layout="wide", page_icon="🏗️")
 
 # --- 2. CSS 美化 ---
