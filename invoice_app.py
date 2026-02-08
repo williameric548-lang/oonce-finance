@@ -8,41 +8,83 @@ import time
 import yfinance as yf
 from datetime import datetime, timedelta
 
-# --- 1. 配置区域 ---
+# --- 1. 全局配置 ---
 API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
 FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
 
-# 设置页面 (宽屏模式)
-st.set_page_config(page_title="OONCE Finance V11", layout="wide", page_icon="💹")
+# 设置页面: 换个更专业的图标 (Building Construction)
+st.set_page_config(page_title="OONCE Finance System", layout="wide", page_icon="🏗️")
 
-# --- 2. CSS 美化 (全屏适配) ---
+# --- 2. 企业级 CSS 美化 ---
 st.markdown("""
 <style>
-    .stApp { background-color: #F5F7F9; }
-    h1 { color: #2C3E50; font-family: 'Helvetica Neue', sans-serif; font-weight: 700; text-align: center; padding-bottom: 20px; }
-    
-    /* 绿色按钮 */
-    div.stButton > button { background-color: #27AE60; color: white; border-radius: 8px; border: none; padding: 10px 24px; font-weight: bold; width: 100%; }
-    div.stButton > button:hover { background-color: #1E8449; color: white; }
-    
-    /* 容器样式 (Input/Output 两个大板块) */
-    [data-testid="stVerticalBlockBorderWrapper"] { 
-        background-color: white; 
-        border-radius: 12px; 
-        box-shadow: 0 4px 15px rgba(0,0,0,0.05); 
-        border: 1px solid #E0E0E0; 
-        border-top: 5px solid #27AE60 !important; 
-        padding: 25px; 
-        margin-bottom: 30px; /* 板块之间增加间距 */
+    /* 全局背景微调 */
+    .stApp {
+        background-color: #f8f9fa;
     }
     
-    /* 表格样式优化 */
-    .stDataFrame { width: 100% !important; }
+    /* 顶部品牌条样式 */
+    .brand-header {
+        background: linear-gradient(90deg, #1E3A8A 0%, #2563EB 100%); /* 深蓝渐变 */
+        padding: 20px;
+        border-radius: 10px;
+        color: white;
+        margin-bottom: 25px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .brand-title {
+        font-family: 'Helvetica Neue', sans-serif;
+        font-size: 24px;
+        font-weight: 800;
+        letter-spacing: 1px;
+    }
+    .brand-subtitle {
+        font-size: 14px;
+        opacity: 0.9;
+        font-weight: 400;
+    }
+
+    /* 侧边栏美化 */
+    [data-testid="stSidebar"] {
+        background-color: #ffffff;
+        border-right: 1px solid #e5e7eb;
+    }
+    
+    /* 绿色按钮 (更深沉的金融绿) */
+    div.stButton > button {
+        background-color: #059669; /* Emerald 600 */
+        color: white;
+        border-radius: 6px;
+        border: none;
+        padding: 0.5rem 1rem;
+        font-weight: 600;
+        transition: all 0.2s;
+    }
+    div.stButton > button:hover {
+        background-color: #047857;
+        box-shadow: 0 4px 12px rgba(5, 150, 105, 0.2);
+    }
+
+    /* 容器卡片样式 */
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        background-color: white;
+        border-radius: 8px;
+        border: 1px solid #e5e7eb;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        padding: 20px;
+        border-top: 4px solid #059669 !important; /* 顶部绿条 */
+    }
+    
+    /* 修正表格字体 */
+    .stDataFrame { font-size: 14px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. 核心逻辑 (保持 V10 逻辑不变) ---
+# --- 3. 核心逻辑 (保持不变) ---
 def get_available_model():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
     try:
@@ -114,9 +156,7 @@ def process_and_save(files, mode, allow_duplicates):
     csv_file = FILE_INPUT if mode == "input" else FILE_OUTPUT
     entity_label = "Vendor" if mode == "input" else "Client"
     key_name = "vendor" if mode == "input" else "client"
-    
     existing_signatures = load_existing_signatures(csv_file)
-    
     progress_bar = st.progress(0)
     results = []
     skipped_files = []
@@ -130,10 +170,7 @@ def process_and_save(files, mode, allow_duplicates):
             raw_total = float(str(res.get("total", 0)).replace(',', ''))
             currency = str(res.get("currency", "ZAR")).upper()
             
-            # 查重
-            current_signature = (raw_inv_no, raw_total)
-            is_duplicate = current_signature in existing_signatures
-            
+            is_duplicate = (raw_inv_no, raw_total) in existing_signatures
             if is_duplicate and not allow_duplicates:
                 skipped_files.append(f"{file.name}")
                 continue
@@ -145,9 +182,7 @@ def process_and_save(files, mode, allow_duplicates):
                 "Total (USD)": "", "Exchange Rate": 1.0, 
                 "Validation": "", "File Name": file.name
             }
-
-            if is_duplicate and allow_duplicates:
-                row["Validation"] = "⚠️ DUPLICATE"
+            if is_duplicate and allow_duplicates: row["Validation"] = "⚠️ DUPLICATE"
             
             if "USD" in currency:
                 rate = get_historical_zar_rate(row["Date"])
@@ -164,21 +199,16 @@ def process_and_save(files, mode, allow_duplicates):
                     calc_total = round(row["Subtotal"] + row["VAT"], 2)
                     if abs(calc_total - row["Total"]) < 0.05: row["Validation"] = "✅ OK"
                     else: row["Validation"] = "❌ Math Error"
-
             results.append(row)
-
         progress_bar.progress((i + 1) / len(files))
 
-    if skipped_files:
-        st.warning(f"🚫 Skipped {len(skipped_files)} duplicates: {', '.join(skipped_files)}")
-
+    if skipped_files: st.toast(f"🚫 Skipped {len(skipped_files)} duplicates", icon="🔕")
     if results:
-        st.success(f"✅ Processed {len(results)} files")
+        st.toast(f"✅ Processed {len(results)} new files", icon="🎉")
         df = pd.DataFrame(results)
         core_cols = ["Date", "Invoice No", entity_label, "Subtotal", "VAT", "Total", "Currency"]
         extra_cols = ["Validation", "File Name", "Total (USD)", "Exchange Rate"]
         df = df[core_cols + extra_cols]
-        
         if os.path.exists(csv_file): df.to_csv(csv_file, mode='a', header=False, index=False, encoding='utf-8-sig')
         else: df.to_csv(csv_file, mode='w', header=True, index=False, encoding='utf-8-sig')
         time.sleep(1)
@@ -188,73 +218,87 @@ def show_interactive_table(mode):
     csv_file = FILE_INPUT if mode == "input" else FILE_OUTPUT
     if os.path.exists(csv_file):
         df = pd.read_csv(csv_file)
-        
-        st.write(f"📝 **{mode.upper()} History Editor (Delete rows using checkbox on left)**")
-        
-        # 启用全宽模式，确保表格不折叠
         edited_df = st.data_editor(
-            df,
-            key=f"editor_{mode}",
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Validation": st.column_config.TextColumn("Status", help="Check for Errors"),
-            }
+            df, key=f"editor_{mode}", num_rows="dynamic", use_container_width=True, hide_index=True,
+            column_config={"Validation": st.column_config.TextColumn("Status")}
         )
-
         if not df.equals(edited_df):
-            if st.button(f"💾 Save Changes ({mode.upper()})", key=f"save_{mode}"):
+            if st.button(f"💾 Save Changes", key=f"save_{mode}"):
                 edited_df.to_csv(csv_file, index=False, encoding='utf-8-sig')
-                st.success("✅ Changes Saved!")
-                time.sleep(1)
-                st.rerun()
-
+                st.success("Saved!")
+                time.sleep(1); st.rerun()
         st.download_button(f"📥 Download CSV", df.to_csv(index=False).encode('utf-8-sig'), f"OONCE_{mode.upper()}.csv")
-    else:
-        st.info("No records yet.")
+    else: st.info("No records.")
 
-# --- 4. 页面布局 (上下结构) ---
+def calculate_metrics():
+    total_in = 0.0; total_out = 0.0
+    if os.path.exists(FILE_INPUT):
+        try: total_in = pd.read_csv(FILE_INPUT)['Total'].sum()
+        except: pass
+    if os.path.exists(FILE_OUTPUT):
+        try: total_out = pd.read_csv(FILE_OUTPUT)['Total'].sum()
+        except: pass
+    return total_in, total_out
 
-st.title("🏭 OONCE Finance Automation")
-st.markdown("---")
+# --- 4. 页面布局 ---
 
-# === 板块 1: INPUT (全宽) ===
+# === 侧边栏 (Sidebar) - 仪表盘与设置 ===
+with st.sidebar:
+    st.image("https://img.icons8.com/?size=100&id=12781&format=png", width=60) # 一个简约的图表图标
+    st.markdown("### Dashboard")
+    
+    tot_in, tot_out = calculate_metrics()
+    net_profit = tot_out - tot_in
+    
+    st.metric("Total Cost (Input)", f"R {tot_in:,.2f}", delta="-Cost", delta_color="inverse")
+    st.metric("Total Revenue (Output)", f"R {tot_out:,.2f}", delta="+Rev")
+    st.divider()
+    st.metric("Net Profit", f"R {net_profit:,.2f}", delta_color="normal" if net_profit>=0 else "inverse")
+    
+    st.markdown("---")
+    st.markdown("### Settings")
+    allow_dup_in = st.checkbox("Allow Duplicates (Input)", value=False)
+    allow_dup_out = st.checkbox("Allow Duplicates (Output)", value=False)
+    
+    st.markdown("---")
+    st.caption(f"API Model: Gemini 1.5 Flash")
+    st.caption("Powered by OONCE Tech")
+
+# === 主区域 (Main) ===
+
+# 品牌 Header
+st.markdown("""
+<div class="brand-header">
+    <div>
+        <div class="brand-title">OONCE FINANCE</div>
+        <div class="brand-subtitle">Great Wall Steel | Intelligent Ledger</div>
+    </div>
+    <div style="font-size:30px;">🏭</div>
+</div>
+""", unsafe_allow_html=True)
+
+# 板块 1: INPUT
 with st.container(border=True): 
-    st.subheader("📥 Input Invoices (Cost)")
-    
-    # 将上传控件和开关放在两列，稍微整洁一点
+    st.markdown("### 📥 Input Invoices (Cost)")
     c1, c2 = st.columns([3, 1])
-    with c1:
-        files_in = st.file_uploader("Upload Vendor Invoices", accept_multiple_files=True, key="in")
-    with c2:
-        st.write("") # 占位
-        st.write("")
-        allow_dup_in = st.checkbox("🔘 Allow Duplicates", value=False, key="check_in")
-        
-    if files_in and st.button("🚀 Process Input", key="btn_in"):
-        process_and_save(files_in, "input", allow_dup_in)
-    
+    with c1: files_in = st.file_uploader("Upload Vendor Invoices", accept_multiple_files=True, key="in")
+    with c2: 
+        st.write(""); st.write("")
+        if files_in and st.button("Process Input", key="btn_in"):
+            process_and_save(files_in, "input", allow_dup_in)
     st.markdown("---")
     show_interactive_table("input")
 
-st.write("") # 增加一点垂直间距
-st.write("") 
+st.write("")
 
-# === 板块 2: OUTPUT (全宽) ===
+# 板块 2: OUTPUT
 with st.container(border=True):
-    st.subheader("📤 Output Invoices (Revenue)")
-    
+    st.markdown("### 📤 Output Invoices (Revenue)")
     c1, c2 = st.columns([3, 1])
-    with c1:
-        files_out = st.file_uploader("Upload Client Invoices", accept_multiple_files=True, key="out")
-    with c2:
-        st.write("")
-        st.write("")
-        allow_dup_out = st.checkbox("🔘 Allow Duplicates", value=False, key="check_out")
-        
-    if files_out and st.button("🚀 Process Output", key="btn_out"):
-        process_and_save(files_out, "output", allow_dup_out)
-    
+    with c1: files_out = st.file_uploader("Upload Client Invoices", accept_multiple_files=True, key="out")
+    with c2: 
+        st.write(""); st.write("")
+        if files_out and st.button("Process Output", key="btn_out"):
+            process_and_save(files_out, "output", allow_dup_out)
     st.markdown("---")
     show_interactive_table("output")
