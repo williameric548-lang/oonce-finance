@@ -9,14 +9,74 @@ import yfinance as yf
 from datetime import datetime, timedelta
 
 # --- 1. 配置区域 ---
-# 从云端保险箱读取密钥
-API_KEY = st.secrets["GOOGLE_API_KEY"]
+API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
 FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
 
-st.set_page_config(page_title="OONCE Finance V5", layout="wide")
+# 设置页面，使用宽屏模式
+st.set_page_config(page_title="OONCE Finance V6", layout="wide", page_icon="💹")
 
-# --- 2. 核心工具函数 ---
+# --- 2. CSS 美化 (魔法区域) ---
+# 这里定义了灰色背景、绿色按钮、和卡片样式
+st.markdown("""
+<style>
+    /* 全局背景色 - 极淡的灰色 */
+    .stApp {
+        background-color: #F5F7F9;
+    }
+    
+    /* 顶部标题样式 */
+    h1 {
+        color: #2C3E50;
+        font-family: 'Helvetica Neue', sans-serif;
+        font-weight: 700;
+        text-align: center;
+        padding-bottom: 20px;
+    }
+    
+    /* 绿色按钮样式 */
+    div.stButton > button {
+        background-color: #27AE60;
+        color: white;
+        border-radius: 8px;
+        border: none;
+        padding: 10px 24px;
+        font-weight: bold;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        width: 100%;
+    }
+    div.stButton > button:hover {
+        background-color: #1E8449;
+        color: white;
+        border: none;
+    }
+
+    /* 两个大板块的卡片样式 (White Box with Shadow) */
+    .finance-card {
+        background-color: white;
+        padding: 25px;
+        border-radius: 12px;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        border-top: 5px solid #27AE60; /* 顶部的绿色条 */
+        margin-bottom: 20px;
+    }
+    
+    /* 历史记录表格样式 */
+    .stDataFrame {
+        border: 1px solid #E0E0E0;
+        border-radius: 5px;
+    }
+    
+    /* 成功的绿色提示条 */
+    .stAlert {
+        background-color: #D4EFDF;
+        color: #145A32;
+        border: 1px solid #A9DFBF;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- 3. 核心逻辑 (保持 V5 不变) ---
 def get_available_model():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
     try:
@@ -31,23 +91,13 @@ def get_available_model():
     return "gemini-1.5-flash"
 
 def get_historical_zar_rate(date_str):
-    """ 
-    获取历史汇率 (智能修复版) 
-    如果发票日期是周末，会自动寻找最近的一个交易日收盘价
-    """
     try:
         inv_date = datetime.strptime(date_str, "%Y-%m-%d")
-        
-        # 【关键修改】: 不只查当天，而是查“过去5天到明天”这个范围
-        # 这样如果当天是周六，就能自动抓到周五的数据
+        # 智能查找周末汇率 (往前推5天)
         start_date = inv_date - timedelta(days=5)
         end_date = inv_date + timedelta(days=1)
-        
         data = yf.download("ZAR=X", start=start_date, end=end_date, progress=False)
-        
         if not data.empty:
-            # iloc[-1] 意思是取“最后一条数据”
-            # 也就是离发票日期最近的那次收盘价
             return float(data['Close'].iloc[-1])
         return None
     except:
@@ -55,11 +105,8 @@ def get_historical_zar_rate(date_str):
 
 def extract_invoice_data(uploaded_file, mode="input"):
     model_name = get_available_model()
-    
     mime_type = "image/jpeg"
-    if uploaded_file.name.lower().endswith('.pdf'):
-        mime_type = "application/pdf"
-    
+    if uploaded_file.name.lower().endswith('.pdf'): mime_type = "application/pdf"
     bytes_data = uploaded_file.getvalue()
     base64_data = base64.b64encode(bytes_data).decode('utf-8')
     
@@ -69,32 +116,19 @@ def extract_invoice_data(uploaded_file, mode="input"):
     prompt = f"""
     Extract invoice data into JSON.
     Fields required: "date" (YYYY-MM-DD), "invoice_number", "{entity_key}", "subtotal", "vat", "total", "currency".
-    
-    Rules:
-    1. If no VAT shown, set "vat": 0.
-    2. Return pure numbers, no commas.
-    3. If currency is Dollars, return "USD".
+    Rules: If no VAT shown, set "vat": 0. Return pure numbers. If currency is Dollars, return "USD".
     """
-
+    
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
     headers = {'Content-Type': 'application/json'}
-    payload = {
-        "contents": [{
-            "parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": mime_type, "data": base64_data}}
-            ]
-        }]
-    }
+    payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
 
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if response.status_code == 200:
             text = response.json()['candidates'][0]['content']['parts'][0]['text']
-            clean_text = text.replace('```json', '').replace('```', '').strip()
-            return json.loads(clean_text)
-        else:
-            return {"Error": f"API Error {response.status_code}"}
+            return json.loads(text.replace('```json', '').replace('```', '').strip())
+        return {"Error": f"API Error {response.status_code}"}
     except Exception as e:
         return {"Error": str(e)}
 
@@ -108,7 +142,6 @@ def process_and_save(files, mode):
     
     for i, file in enumerate(files):
         res = extract_invoice_data(file, mode=mode)
-        
         if "date" in res:
             raw_subtotal = float(str(res.get("subtotal", 0)).replace(',', ''))
             raw_vat = float(str(res.get("vat", 0)).replace(',', ''))
@@ -116,87 +149,133 @@ def process_and_save(files, mode):
             currency = str(res.get("currency", "ZAR")).upper()
             
             row = {
-                "Date": res.get("date"),
-                "Invoice No": res.get("invoice_number"),
-                entity_label: res.get(key_name),
-                "Currency": currency,
-                "Subtotal": 0.0,
-                "VAT": 0.0,
-                "Total": 0.0,
-                "Total (USD)": "",
-                "Exchange Rate": 1.0,
-                "File Name": file.name
+                "Date": res.get("date"), "Invoice No": res.get("invoice_number"),
+                entity_label: res.get(key_name), "Currency": currency,
+                "Subtotal": 0.0, "VAT": 0.0, "Total": 0.0,
+                "Total (USD)": "", "Exchange Rate": 1.0, "File Name": file.name
             }
 
             if "USD" in currency:
                 rate = get_historical_zar_rate(row["Date"])
-                if not rate: 
-                    rate = 1.0
-                    row["Exchange Rate"] = "Error"
-                else:
-                    row["Exchange Rate"] = round(rate, 4)
+                if not rate: rate = 1.0; row["Exchange Rate"] = "Error"
+                else: row["Exchange Rate"] = round(rate, 4)
                 
                 converted_val = round(raw_subtotal * (rate if isinstance(rate, float) else 0), 2)
-                row["Subtotal"] = converted_val
-                row["VAT"] = 0.0
-                row["Total"] = converted_val
+                row["Subtotal"] = converted_val; row["VAT"] = 0.0; row["Total"] = converted_val
                 row["Total (USD)"] = raw_subtotal
-                
             else:
-                row["Subtotal"] = raw_subtotal
-                row["VAT"] = raw_vat
-                row["Total"] = raw_total
-                row["Total (USD)"] = ""
-                row["Exchange Rate"] = 1.0
-
+                row["Subtotal"] = raw_subtotal; row["VAT"] = raw_vat; row["Total"] = raw_total
+                row["Total (USD)"] = ""; row["Exchange Rate"] = 1.0
             results.append(row)
-        
         progress_bar.progress((i + 1) / len(files))
 
     if results:
-        st.success(f"✅ {mode.upper()} Processed!")
+        st.success(f"✅ {len(results)} Invoices Processed Successfully!")
         df = pd.DataFrame(results)
-        
         core_cols = ["Date", "Invoice No", entity_label, "Subtotal", "VAT", "Total", "Currency"]
         extra_cols = ["File Name", "Total (USD)", "Exchange Rate"]
         df = df[core_cols + extra_cols]
-        
-        st.dataframe(df)
-        
-        if os.path.exists(csv_file):
-            df.to_csv(csv_file, mode='a', header=False, index=False, encoding='utf-8-sig')
-        else:
-            df.to_csv(csv_file, mode='w', header=True, index=False, encoding='utf-8-sig')
+        st.dataframe(df, use_container_width=True)
+        if os.path.exists(csv_file): df.to_csv(csv_file, mode='a', header=False, index=False, encoding='utf-8-sig')
+        else: df.to_csv(csv_file, mode='w', header=True, index=False, encoding='utf-8-sig')
+        time.sleep(1)
+        st.rerun() # 自动刷新页面以更新顶部仪表盘
 
-def show_history(mode):
+# --- 4. 辅助显示函数 (带下载) ---
+def show_history_table(mode):
     csv_file = FILE_INPUT if mode == "input" else FILE_OUTPUT
-    
     if os.path.exists(csv_file):
-        st.markdown(f"**📂 History ({mode.upper()})**")
-        df_hist = pd.read_csv(csv_file)
-        st.dataframe(df_hist.tail(5))
-        
+        df = pd.read_csv(csv_file)
+        st.dataframe(df.tail(5), use_container_width=True)
         c1, c2 = st.columns([1, 4])
         with c1:
-            st.download_button(f"📥 Download CSV", df_hist.to_csv(index=False).encode('utf-8-sig'), f"OONCE_{mode.upper()}.csv")
+            st.download_button(f"📥 Download CSV", df.to_csv(index=False).encode('utf-8-sig'), f"OONCE_{mode.upper()}.csv", use_container_width=True)
         with c2:
             if st.button(f"🗑️ Clear Log", key=f"clr_{mode}"):
                 os.remove(csv_file)
                 st.rerun()
 
-# --- 3. 界面 ---
-st.title("🏭 OONCE Finance Automation (V5)")
+# --- 5. 统计仪表盘逻辑 ---
+def calculate_metrics():
+    total_in = 0.0
+    total_out = 0.0
+    
+    if os.path.exists(FILE_INPUT):
+        try: total_in = pd.read_csv(FILE_INPUT)['Total'].sum()
+        except: pass
+        
+    if os.path.exists(FILE_OUTPUT):
+        try: total_out = pd.read_csv(FILE_OUTPUT)['Total'].sum()
+        except: pass
+        
+    return total_in, total_out
 
-# Input
-st.header("📥 INPUT (Vendor)")
-files_in = st.file_uploader("Upload Vendor Invoices", accept_multiple_files=True, key="in")
-if files_in and st.button("🚀 Process INPUT", key="bin"): process_and_save(files_in, "input")
-show_history("input")
+# --- 6. 页面主布局 ---
 
-st.divider()
+st.title("🏭 OONCE Finance Automation")
+st.markdown("---")
 
-# Output
-st.header("📤 OUTPUT (Client)")
-files_out = st.file_uploader("Upload Client Invoices", accept_multiple_files=True, key="out")
-if files_out and st.button("🚀 Process OUTPUT", key="bout"): process_and_save(files_out, "output")
-show_history("output")
+# === 顶部仪表盘 (Dashboard) ===
+tot_in, tot_out = calculate_metrics()
+net_profit = tot_out - tot_in
+
+col_m1, col_m2, col_m3 = st.columns(3)
+with col_m1:
+    st.markdown(f"""
+    <div style="background-color:white; padding:15px; border-radius:10px; border-left:5px solid #E74C3C; box-shadow: 0 2px 5px #ddd;">
+        <h4 style="color:#7f8c8d; margin:0;">📉 Total Cost (Input)</h4>
+        <h2 style="color:#2C3E50; margin:0;">R {tot_in:,.2f}</h2>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col_m2:
+    st.markdown(f"""
+    <div style="background-color:white; padding:15px; border-radius:10px; border-left:5px solid #27AE60; box-shadow: 0 2px 5px #ddd;">
+        <h4 style="color:#7f8c8d; margin:0;">📈 Total Revenue (Output)</h4>
+        <h2 style="color:#2C3E50; margin:0;">R {tot_out:,.2f}</h2>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col_m3:
+    color = "#27AE60" if net_profit >= 0 else "#E74C3C"
+    st.markdown(f"""
+    <div style="background-color:white; padding:15px; border-radius:10px; border-left:5px solid {color}; box-shadow: 0 2px 5px #ddd;">
+        <h4 style="color:#7f8c8d; margin:0;">💰 Net Profit</h4>
+        <h2 style="color:{color}; margin:0;">R {net_profit:,.2f}</h2>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# === 主体内容 (左右分栏) ===
+col_left, col_right = st.columns(2, gap="large")
+
+with col_left:
+    # --- INPUT 模块 (左边) ---
+    st.markdown('<div class="finance-card">', unsafe_allow_html=True) # 开始卡片
+    st.subheader("📥 Input Invoices (Cost)")
+    st.caption("Suppliers / Bills / Expenses")
+    
+    files_in = st.file_uploader("Upload Vendor Invoices", accept_multiple_files=True, key="in")
+    if files_in:
+        if st.button("Process Input", key="btn_in"):
+            process_and_save(files_in, "input")
+    
+    st.markdown("---")
+    show_history_table("input")
+    st.markdown('</div>', unsafe_allow_html=True) # 结束卡片
+
+with col_right:
+    # --- OUTPUT 模块 (右边) ---
+    st.markdown('<div class="finance-card">', unsafe_allow_html=True) # 开始卡片
+    st.subheader("📤 Output Invoices (Revenue)")
+    st.caption("Clients / Sales / Incomes")
+    
+    files_out = st.file_uploader("Upload Client Invoices", accept_multiple_files=True, key="out")
+    if files_out:
+        if st.button("Process Output", key="btn_out"):
+            process_and_save(files_out, "output")
+    
+    st.markdown("---")
+    show_history_table("output")
+    st.markdown('</div>', unsafe_allow_html=True) # 结束卡片
