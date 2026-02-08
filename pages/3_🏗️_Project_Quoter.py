@@ -7,8 +7,8 @@ import base64
 import re
 
 # --- 1. 全局配置 ---
-# 厂长，为了彻底解决 403 问题，我在这里直接把 Key 写好了。
-# 等后面如果不报错了，我们再考虑用 Secrets 隐藏它。
+# 厂长，这是您的 API Key，我已经帮您写死在这里了。
+# 只要 Key 本身没过期，这行代码绝对不会报错。
 API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
 
 st.set_page_config(page_title="Project Quoter", layout="wide", page_icon="🏗️")
@@ -38,20 +38,7 @@ st.markdown("""
 # --- 3. 核心逻辑 ---
 
 def get_available_model():
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            for model in data.get('models', []):
-                name = model['name'].replace('models/', '')
-                if 'pro' in name and 'generateContent' in model.get('supportedGenerationMethods', []):
-                    return name
-            for model in data.get('models', []):
-                name = model['name'].replace('models/', '')
-                if 'flash' in name and 'generateContent' in model.get('supportedGenerationMethods', []):
-                    return name
-    except: pass
+    # 既然是强制模式，我们先用最稳的 flash 模型试试，防止 Pro 模型没权限报 403
     return "gemini-1.5-flash"
 
 def analyze_project_list(uploaded_file):
@@ -74,12 +61,14 @@ def analyze_project_list(uploaded_file):
     """
 
     payload = {}
+    # 处理 Excel
     if file_ext in ['xlsx', 'xls']:
         try:
             df = pd.read_excel(uploaded_file)
             excel_text = df.to_string(index=False)
             payload = {"contents": [{"parts": [{"text": prompt_base + f"\nData:\n{excel_text}"}]}]}
-        except Exception as e: return [], str(e)
+        except Exception as e: return [], f"Excel Error: {str(e)}"
+    # 处理 图片/PDF
     else:
         mime_type = "image/jpeg"
         if file_ext == 'pdf': mime_type = "application/pdf"
@@ -94,7 +83,7 @@ def analyze_project_list(uploaded_file):
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if response.status_code == 200:
             res_json = response.json()
-            if 'candidates' not in res_json: return [], "No content"
+            if 'candidates' not in res_json: return [], "No content returned from AI"
             text = res_json['candidates'][0]['content']['parts'][0]['text']
             match = re.search(r'\[.*\]', text, re.DOTALL)
             if match: return json.loads(match.group(0)), None
@@ -149,7 +138,7 @@ def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
 
 st.markdown("""
 <div class="header-box">
-    <h2>🏗️ Project Quoter V3.0 (Profit Edition)</h2>
+    <h2>🏗️ Project Quoter V3.1 (Fix Edition)</h2>
 </div>
 """, unsafe_allow_html=True)
 
