@@ -13,80 +13,30 @@ API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
 FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
 
-# 设置页面: 图标改为"增长趋势"，去除工厂属性
+# 设置页面
 st.set_page_config(page_title="OONCE Finance", layout="wide", page_icon="📈")
 
-# --- 2. CSS 美化 (独立品牌风格) ---
+# --- 2. CSS 美化 ---
 st.markdown("""
 <style>
-    /* 全局背景微调 */
-    .stApp {
-        background-color: #f8f9fa;
-    }
-    
-    /* 顶部品牌条样式 - 纯粹的 OONCE 蓝 */
+    .stApp { background-color: #f8f9fa; }
     .brand-header {
-        background: linear-gradient(135deg, #0F2027 0%, #203A43 50%, #2C5364 100%); /* 深邃黑蓝渐变 */
-        padding: 25px;
-        border-radius: 12px;
-        color: white;
-        margin-bottom: 25px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
+        background: linear-gradient(135deg, #0F2027 0%, #203A43 50%, #2C5364 100%);
+        padding: 25px; border-radius: 12px; color: white; margin-bottom: 25px;
+        display: flex; align-items: center; justify-content: space-between;
         box-shadow: 0 4px 15px rgba(0,0,0,0.1);
     }
-    .brand-title {
-        font-family: 'Helvetica Neue', sans-serif;
-        font-size: 28px;
-        font-weight: 800;
-        letter-spacing: 2px;
-        color: #ffffff;
-    }
-    .brand-subtitle {
-        font-size: 14px;
-        opacity: 0.8;
-        font-weight: 400;
-        margin-top: 5px;
-        letter-spacing: 1px;
-    }
-
-    /* 侧边栏美化 */
-    [data-testid="stSidebar"] {
-        background-color: #ffffff;
-        border-right: 1px solid #e5e7eb;
-    }
-    
-    /* 按钮样式 (保持专业的绿色) */
-    div.stButton > button {
-        background-color: #059669; 
-        color: white;
-        border-radius: 6px;
-        border: none;
-        padding: 0.5rem 1rem;
-        font-weight: 600;
-        transition: all 0.2s;
-    }
-    div.stButton > button:hover {
-        background-color: #047857;
-        box-shadow: 0 4px 12px rgba(5, 150, 105, 0.2);
-    }
-
-    /* 容器卡片样式 */
-    [data-testid="stVerticalBlockBorderWrapper"] {
-        background-color: white;
-        border-radius: 8px;
-        border: 1px solid #e5e7eb;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-        padding: 20px;
-        border-top: 4px solid #059669 !important;
-    }
-    
+    .brand-title { font-family: 'Helvetica Neue', sans-serif; font-size: 28px; font-weight: 800; letter-spacing: 2px; color: #ffffff; }
+    .brand-subtitle { font-size: 14px; opacity: 0.8; font-weight: 400; margin-top: 5px; letter-spacing: 1px; }
+    [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e5e7eb; }
+    div.stButton > button { background-color: #059669; color: white; border-radius: 6px; border: none; padding: 0.5rem 1rem; font-weight: 600; transition: all 0.2s; }
+    div.stButton > button:hover { background-color: #047857; box-shadow: 0 4px 12px rgba(5, 150, 105, 0.2); }
+    [data-testid="stVerticalBlockBorderWrapper"] { background-color: white; border-radius: 8px; border: 1px solid #e5e7eb; box-shadow: 0 1px 3px rgba(0,0,0,0.05); padding: 20px; border-top: 4px solid #059669 !important; }
     .stDataFrame { font-size: 14px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. 核心逻辑 (保持不变) ---
+# --- 3. 核心逻辑 ---
 def get_available_model():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
     try:
@@ -96,8 +46,7 @@ def get_available_model():
             for model in data.get('models', []):
                 if 'generateContent' in model.get('supportedGenerationMethods', []):
                     return model['name'].replace('models/', '')
-    except:
-        pass
+    except: pass
     return "gemini-1.5-flash"
 
 def get_historical_zar_rate(date_str):
@@ -106,11 +55,9 @@ def get_historical_zar_rate(date_str):
         start_date = inv_date - timedelta(days=5)
         end_date = inv_date + timedelta(days=1)
         data = yf.download("ZAR=X", start=start_date, end=end_date, progress=False)
-        if not data.empty:
-            return float(data['Close'].iloc[-1])
+        if not data.empty: return float(data['Close'].iloc[-1])
         return None
-    except:
-        return None
+    except: return None
 
 def extract_invoice_data(uploaded_file, mode="input"):
     model_name = get_available_model()
@@ -138,8 +85,7 @@ def extract_invoice_data(uploaded_file, mode="input"):
             text = response.json()['candidates'][0]['content']['parts'][0]['text']
             return json.loads(text.replace('```json', '').replace('```', '').strip())
         return {"Error": f"API Error {response.status_code}"}
-    except Exception as e:
-        return {"Error": str(e)}
+    except Exception as e: return {"Error": str(e)}
 
 def load_existing_signatures(csv_file):
     signatures = set()
@@ -147,7 +93,8 @@ def load_existing_signatures(csv_file):
         try:
             df = pd.read_csv(csv_file)
             for _, row in df.iterrows():
-                inv_no = str(row.get('Invoice No', '')).strip()
+                # 历史数据也强制转大写对比，防止漏网之鱼
+                inv_no = str(row.get('Invoice No', '')).strip().upper()
                 try: total = float(str(row.get('Total', 0)).replace(',', ''))
                 except: total = 0.0
                 signatures.add((inv_no, total))
@@ -166,11 +113,15 @@ def process_and_save(files, mode, allow_duplicates):
     for i, file in enumerate(files):
         res = extract_invoice_data(file, mode=mode)
         if "date" in res:
-            raw_inv_no = str(res.get("invoice_number", "")).strip()
+            # --- 【关键修改】强制转大写 (UPPERCASE) ---
+            raw_inv_no = str(res.get("invoice_number", "")).strip().upper()
+            raw_entity_name = str(res.get(key_name, "")).strip().upper()
+            currency = str(res.get("currency", "ZAR")).upper()
+            # ---------------------------------------
+
             raw_subtotal = float(str(res.get("subtotal", 0)).replace(',', ''))
             raw_vat = float(str(res.get("vat", 0)).replace(',', ''))
             raw_total = float(str(res.get("total", 0)).replace(',', ''))
-            currency = str(res.get("currency", "ZAR")).upper()
             
             is_duplicate = (raw_inv_no, raw_total) in existing_signatures
             if is_duplicate and not allow_duplicates:
@@ -178,8 +129,10 @@ def process_and_save(files, mode, allow_duplicates):
                 continue
             
             row = {
-                "Date": res.get("date"), "Invoice No": raw_inv_no,
-                entity_label: res.get(key_name), "Currency": currency,
+                "Date": res.get("date"), 
+                "Invoice No": raw_inv_no,       # 大写
+                entity_label: raw_entity_name,  # 大写 (Vendor/Client)
+                "Currency": currency,           # 大写
                 "Subtotal": 0.0, "VAT": 0.0, "Total": 0.0,
                 "Total (USD)": "", "Exchange Rate": 1.0, 
                 "Validation": "", "File Name": file.name
@@ -244,29 +197,21 @@ def calculate_metrics():
 
 # --- 4. 页面布局 ---
 
-# === 侧边栏 (Sidebar) ===
 with st.sidebar:
     st.markdown("### 📊 Dashboard")
-    
     tot_in, tot_out = calculate_metrics()
     net_profit = tot_out - tot_in
-    
     st.metric("Total Cost (Input)", f"R {tot_in:,.2f}", delta="-Cost", delta_color="inverse")
     st.metric("Total Revenue (Output)", f"R {tot_out:,.2f}", delta="+Rev")
     st.divider()
     st.metric("Net Profit", f"R {net_profit:,.2f}", delta_color="normal" if net_profit>=0 else "inverse")
-    
     st.markdown("---")
     st.markdown("### ⚙️ Settings")
     allow_dup_in = st.checkbox("Allow Duplicates (Input)", value=False)
     allow_dup_out = st.checkbox("Allow Duplicates (Output)", value=False)
-    
     st.markdown("---")
-    st.caption("System: OONCE v13.0")
+    st.caption("System: OONCE v14.0")
 
-# === 主区域 (Main) ===
-
-# 独立品牌 Header
 st.markdown("""
 <div class="brand-header">
     <div>
@@ -277,7 +222,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# 板块 1: INPUT
 with st.container(border=True): 
     st.markdown("### 📥 Input Invoices (Cost)")
     c1, c2 = st.columns([3, 1])
@@ -291,7 +235,6 @@ with st.container(border=True):
 
 st.write("")
 
-# 板块 2: OUTPUT
 with st.container(border=True):
     st.markdown("### 📤 Output Invoices (Revenue)")
     c1, c2 = st.columns([3, 1])
