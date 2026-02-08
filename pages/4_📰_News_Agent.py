@@ -1,58 +1,148 @@
-# ... (前面的 CSS 和 Header 不变)
+import streamlit as st
+import pandas as pd
+from duckduckgo_search import DDGS
+import datetime
+import requests
+import json
+
+# --- 1. 安全配置 ---
+try:
+    # 自动清洗空格，防止 400 错误
+    API_KEY = st.secrets["GEMINI_KEY"].strip()
+except Exception:
+    st.error("🚨 未检测到 API Key！请配置 Secrets。")
+    st.stop()
+
+st.set_page_config(page_title="News Agent", layout="wide", page_icon="📰")
+
+# --- 2. CSS 美化 ---
+st.markdown("""
+<style>
+    .wechat-box {
+        background-color: white; border: 1px solid #e7e7eb; padding: 20px;
+        border-radius: 5px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+    .wechat-title { font-size: 22px; font-weight: 600; color: #333; margin-bottom: 10px; }
+    .wechat-meta { font-size: 14px; color: #666; margin-bottom: 20px; }
+    .wechat-content { font-size: 16px; line-height: 1.8; color: #333; }
+</style>
+""", unsafe_allow_html=True)
+
+# --- 3. 核心逻辑 ---
+
+def get_gemini_response(prompt):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={API_KEY}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+        if response.status_code == 200:
+            return response.json()['candidates'][0]['content']['parts'][0]['text']
+    except: pass
+    return None
+
+def search_sa_news(topics):
+    results = []
+    # 使用 DuckDuckGo 免费搜索
+    try:
+        ddgs = DDGS()
+        for topic in topics:
+            query = f"South Africa {topic} news latest"
+            # 搜索最近一天的新闻
+            search_res = list(ddgs.news(keywords=query, region="za-en", timelimit="d", max_results=3))
+            for res in search_res:
+                results.append({
+                    "topic": topic,
+                    "title": res['title'],
+                    "snippet": res['body'],
+                    "source": res['source'],
+                    "url": res['url']
+                })
+    except Exception as e:
+        st.error(f"Search Error: {e}")
+            
+    return results
+
+def generate_wechat_article(news_items):
+    if not news_items: return None
+
+    news_text = ""
+    for idx, item in enumerate(news_items):
+        news_text += f"{idx+1}. [{item['topic']}] {item['title']}: {item['snippet']} (Source: {item['source']})\n"
+
+    prompt = f"""
+    You are a professional WeChat Official Account Editor for the Chinese community in South Africa.
+    Task: Write a viral daily news summary.
+    Target: Chinese expats in SA.
+    
+    Requirements:
+    1. **Tone**: Urgent, helpful, slightly sensational (Shocking/Important). Use emojis.
+    2. **Structure**:
+       - **Catchy Title**: e.g. "Attention! New Home Affairs rule!".
+       - **Intro**: Greetings, Exchange rate check.
+       - **Body**: Translate core info to Chinese. Highlight impacts on Chinese people.
+       - **Fun**: Recommend a random popular SA dish if no food news.
+    
+    Input News Data:
+    {news_text}
+    """
+    
+    return get_gemini_response(prompt)
+
+# --- 4. 页面布局 ---
 
 st.markdown("""
-<div class="main-header">
-    <h1>🏭 OONCE Enterprise Suite</h1>
-    <p>Integrated Intelligent Business Automation System</p>
+<div class="header-box" style="background: linear-gradient(135deg, #07c160 0%, #059669 100%); padding: 20px; border-radius: 10px; color: white; margin-bottom: 20px;">
+    <h2>📰 News Agent | 南非头条爆文生成器</h2>
 </div>
 """, unsafe_allow_html=True)
 
-# 第一行
-c1, c2 = st.columns(2)
+with st.sidebar:
+    st.header("🔍 选题设置")
+    topics = st.multiselect(
+        "选择关注领域",
+        ["Immigration/Home Affairs", "Crime/Safety", "Johannesburg Traffic", "Eskom/Loadshedding", "Exchange Rate", "Food/Lifestyle"],
+        default=["Immigration/Home Affairs", "Crime/Safety"]
+    )
+    
+    st.markdown("---")
+    if st.button("🔄 扫描全网新闻"):
+        with st.spinner("🕵️‍♂️ 正在搜索各大南非媒体头条..."):
+            news_data = search_sa_news(topics)
+            if news_data:
+                st.session_state['news_data'] = news_data
+                st.success(f"抓取到 {len(news_data)} 条相关新闻！")
+            else:
+                st.warning("暂未搜到相关新闻，或者搜索服务繁忙。")
 
-with c1:
-    st.markdown("""
-    <div class="card">
-        <span class="icon">💰</span>
-        <h3>Invoice Manager</h3>
-        <p>OCR Recognition | Auto-Accounting</p>
-        <p><i>Go to sidebar <b>Page 1</b></i></p>
+# === 主界面 ===
+
+if 'news_data' in st.session_state:
+    st.subheader("📡 原始素材 (Raw Data)")
+    with st.expander("点击查看新闻列表", expanded=False):
+        for item in st.session_state['news_data']:
+            st.markdown(f"**[{item['topic']}]** [{item['title']}]({item['url']})")
+            st.caption(f"Source: {item['source']}")
+    
+    st.divider()
+    
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if st.button("🚀 AI 撰写公众号文章"):
+            with st.spinner("✍️ Gemini 正在撰写..."):
+                article_content = generate_wechat_article(st.session_state['news_data'])
+                if article_content:
+                    st.session_state['final_article'] = article_content
+                    st.success("撰写完成！")
+
+if 'final_article' in st.session_state:
+    st.subheader("📱 公众号预览")
+    content = st.session_state['final_article']
+    st.markdown(f"""
+    <div class="wechat-box">
+        <div class="wechat-content">
+            {st.markdown(content)}
+        </div>
     </div>
     """, unsafe_allow_html=True)
-
-with c2:
-    st.markdown("""
-    <div class="card" style="border-top-color: #1e3c72;">
-        <span class="icon">🚢</span>
-        <h3>Import Master</h3>
-        <p>Landed Cost | Customs Pricing</p>
-        <p><i>Go to sidebar <b>Page 2</b></i></p>
-    </div>
-    """, unsafe_allow_html=True)
-
-st.write("") # 空一行
-
-# 第二行
-c3, c4 = st.columns(2)
-
-with c3:
-    st.markdown("""
-    <div class="card" style="border-top-color: #ff9800;">
-        <span class="icon">🏗️</span>
-        <h3>Project Quoter</h3>
-        <p>Engineering Quote | Superlink Logistics</p>
-        <p><i>Go to sidebar <b>Page 3</b></i></p>
-    </div>
-    """, unsafe_allow_html=True)
-
-with c4:
-    st.markdown("""
-    <div class="card" style="border-top-color: #07c160;">
-        <span class="icon">📰</span>
-        <h3>News Agent</h3>
-        <p>Viral Article Generator | SA Headlines</p>
-        <p><i>Go to sidebar <b>Page 4</b></i></p>
-    </div>
-    """, unsafe_allow_html=True)
-
-# ... (底部 Footer)
