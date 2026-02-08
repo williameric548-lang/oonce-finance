@@ -188,4 +188,9 @@ if 'project_data' in st.session_state:
     st.subheader("💰 Final Quotation Overview")
     
     c1, c2, c3 = st.columns(3)
-    with c1: st.markdown(f"<div class
+    with c1: st.markdown(f"<div class='metric-box'><h4>Product Subtotal</h4><h2>${summary['total_product_value']:,.2f}</h2></div>", unsafe_allow_html=True)
+    with c2: st.markdown(f"<div class='metric-box'><h4>Freight Cost</h4><h2>${summary['total_freight']:,.2f}</h2><p>{int(summary['num_trucks'])}x Superlinks</p></div>", unsafe_allow_html=True)
+    with c3: st.markdown(f"<div class='metric-box' style='border-left-color: #d32f2f;'><h4>Grand Total</h4><h2 style='color:#d32f2f'>${summary['grand_total']:,.2f}</h2></div>", unsafe_allow_html=True)
+
+    csv = final_df.to_csv(index=False).encode('utf-8')
+    st.download_button("📄 Download Full Quote (CSV)", csv, "Project_Quote.csv")
