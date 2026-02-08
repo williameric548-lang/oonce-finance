@@ -14,7 +14,7 @@ FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
 
 # 设置页面
-st.set_page_config(page_title="OONCE Finance", layout="wide", page_icon="📈")
+st.set_page_config(page_title="OONCE Finance", layout="wide", page_icon="📸")
 
 # --- 2. CSS 美化 ---
 st.markdown("""
@@ -29,7 +29,7 @@ st.markdown("""
     .brand-title { font-family: 'Helvetica Neue', sans-serif; font-size: 28px; font-weight: 800; letter-spacing: 2px; color: #ffffff; }
     .brand-subtitle { font-size: 14px; opacity: 0.8; font-weight: 400; margin-top: 5px; letter-spacing: 1px; }
     [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e5e7eb; }
-    div.stButton > button { background-color: #059669; color: white; border-radius: 6px; border: none; padding: 0.5rem 1rem; font-weight: 600; transition: all 0.2s; }
+    div.stButton > button { background-color: #059669; color: white; border-radius: 6px; border: none; padding: 0.5rem 1rem; font-weight: 600; transition: all 0.2s; width: 100%; }
     div.stButton > button:hover { background-color: #047857; box-shadow: 0 4px 12px rgba(5, 150, 105, 0.2); }
     [data-testid="stVerticalBlockBorderWrapper"] { background-color: white; border-radius: 8px; border: 1px solid #e5e7eb; box-shadow: 0 1px 3px rgba(0,0,0,0.05); padding: 20px; border-top: 4px solid #059669 !important; }
     .stDataFrame { font-size: 14px; }
@@ -62,7 +62,10 @@ def get_historical_zar_rate(date_str):
 def extract_invoice_data(uploaded_file, mode="input"):
     model_name = get_available_model()
     mime_type = "image/jpeg"
-    if uploaded_file.name.lower().endswith('.pdf'): mime_type = "application/pdf"
+    # 判断是否为 PDF，如果不是则默认为图片
+    if hasattr(uploaded_file, 'name') and uploaded_file.name.lower().endswith('.pdf'): 
+        mime_type = "application/pdf"
+    
     bytes_data = uploaded_file.getvalue()
     base64_data = base64.b64encode(bytes_data).decode('utf-8')
     
@@ -93,7 +96,6 @@ def load_existing_signatures(csv_file):
         try:
             df = pd.read_csv(csv_file)
             for _, row in df.iterrows():
-                # 历史数据也强制转大写对比，防止漏网之鱼
                 inv_no = str(row.get('Invoice No', '')).strip().upper()
                 try: total = float(str(row.get('Total', 0)).replace(',', ''))
                 except: total = 0.0
@@ -105,7 +107,11 @@ def process_and_save(files, mode, allow_duplicates):
     csv_file = FILE_INPUT if mode == "input" else FILE_OUTPUT
     entity_label = "Vendor" if mode == "input" else "Client"
     key_name = "vendor" if mode == "input" else "client"
+    
     existing_signatures = load_existing_signatures(csv_file)
+    # 【V16 修复】: 本次批量处理内部的指纹库，防止一次拖入3个重复文件被录入
+    current_batch_signatures = set()
+    
     progress_bar = st.progress(0)
     results = []
     skipped_files = []
@@ -113,31 +119,41 @@ def process_and_save(files, mode, allow_duplicates):
     for i, file in enumerate(files):
         res = extract_invoice_data(file, mode=mode)
         if "date" in res:
-            # --- 【关键修改】强制转大写 (UPPERCASE) ---
             raw_inv_no = str(res.get("invoice_number", "")).strip().upper()
             raw_entity_name = str(res.get(key_name, "")).strip().upper()
             currency = str(res.get("currency", "ZAR")).upper()
-            # ---------------------------------------
 
             raw_subtotal = float(str(res.get("subtotal", 0)).replace(',', ''))
             raw_vat = float(str(res.get("vat", 0)).replace(',', ''))
             raw_total = float(str(res.get("total", 0)).replace(',', ''))
             
-            is_duplicate = (raw_inv_no, raw_total) in existing_signatures
-            if is_duplicate and not allow_duplicates:
-                skipped_files.append(f"{file.name}")
+            # 指纹比对 (历史库 + 当前批次库)
+            signature = (raw_inv_no, raw_total)
+            is_duplicate_history = signature in existing_signatures
+            is_duplicate_batch = signature in current_batch_signatures
+            
+            # 如果是重复，且不允许重复 -> 跳过
+            if (is_duplicate_history or is_duplicate_batch) and not allow_duplicates:
+                # 给文件名加上标识，方便知道是哪个
+                fname = getattr(file, 'name', 'Camera_Photo')
+                skipped_files.append(f"{fname}")
                 continue
             
+            # 准备文件名 (相机照片可能没有名字)
+            fname = getattr(file, 'name', f"Photo_{datetime.now().strftime('%H%M%S')}.jpg")
+
             row = {
                 "Date": res.get("date"), 
-                "Invoice No": raw_inv_no,       # 大写
-                entity_label: raw_entity_name,  # 大写 (Vendor/Client)
-                "Currency": currency,           # 大写
+                "Invoice No": raw_inv_no,       
+                entity_label: raw_entity_name,  
+                "Currency": currency,           
                 "Subtotal": 0.0, "VAT": 0.0, "Total": 0.0,
                 "Total (USD)": "", "Exchange Rate": 1.0, 
-                "Validation": "", "File Name": file.name
+                "Validation": "", "File Name": fname
             }
-            if is_duplicate and allow_duplicates: row["Validation"] = "⚠️ DUPLICATE"
+            
+            if (is_duplicate_history or is_duplicate_batch) and allow_duplicates:
+                row["Validation"] = "⚠️ DUPLICATE"
             
             if "USD" in currency:
                 rate = get_historical_zar_rate(row["Date"])
@@ -146,15 +162,19 @@ def process_and_save(files, mode, allow_duplicates):
                 converted_val = round(raw_subtotal * (rate if isinstance(rate, float) else 0), 2)
                 row["Subtotal"] = converted_val; row["VAT"] = 0.0; row["Total"] = converted_val
                 row["Total (USD)"] = raw_subtotal
-                if not is_duplicate: row["Validation"] = "✅ USD Auto"
+                if "DUPLICATE" not in row["Validation"]: row["Validation"] = "✅ USD Auto"
             else:
                 row["Subtotal"] = raw_subtotal; row["VAT"] = raw_vat; row["Total"] = raw_total
                 row["Total (USD)"] = ""; row["Exchange Rate"] = 1.0
-                if not is_duplicate:
+                if "DUPLICATE" not in row["Validation"]:
                     calc_total = round(row["Subtotal"] + row["VAT"], 2)
                     if abs(calc_total - row["Total"]) < 0.05: row["Validation"] = "✅ OK"
                     else: row["Validation"] = "❌ Math Error"
+            
             results.append(row)
+            # 录入后，加入当前批次指纹库
+            current_batch_signatures.add(signature)
+            
         progress_bar.progress((i + 1) / len(files))
 
     if skipped_files: st.toast(f"🚫 Skipped {len(skipped_files)} duplicates", icon="🔕")
@@ -206,42 +226,76 @@ with st.sidebar:
     st.divider()
     st.metric("Net Profit", f"R {net_profit:,.2f}", delta_color="normal" if net_profit>=0 else "inverse")
     st.markdown("---")
-    st.markdown("### ⚙️ Settings")
-    allow_dup_in = st.checkbox("Allow Duplicates (Input)", value=False)
-    allow_dup_out = st.checkbox("Allow Duplicates (Output)", value=False)
-    st.markdown("---")
-    st.caption("System: OONCE v14.0")
+    st.caption("System: OONCE v17.0 (Mobile)")
 
 st.markdown("""
 <div class="brand-header">
     <div>
         <div class="brand-title">OONCE FINANCE</div>
-        <div class="brand-subtitle">Enterprise Edition | Intelligent Automation</div>
+        <div class="brand-subtitle">Enterprise Edition | Mobile & Web</div>
     </div>
     <div style="font-size:32px;">💎</div>
 </div>
 """, unsafe_allow_html=True)
 
+# 板块 1: INPUT
 with st.container(border=True): 
     st.markdown("### 📥 Input Invoices (Cost)")
+    
+    # 布局: 上传控件
     c1, c2 = st.columns([3, 1])
-    with c1: files_in = st.file_uploader("Upload Vendor Invoices", accept_multiple_files=True, key="in")
+    with c1: 
+        # 文件上传 (支持多文件)
+        files_in_upload = st.file_uploader("Upload Files (PDF/Image)", accept_multiple_files=True, key="in_up")
+        
+        # 拍照 (手机专用)
+        # 放在折叠栏里，避免电脑端占地方
+        with st.expander("📸 Take a Photo (Camera)"):
+            cam_in = st.camera_input("Snap Invoice", key="cam_in")
+            
     with c2: 
         st.write(""); st.write("")
-        if files_in and st.button("Process Input", key="btn_in"):
-            process_and_save(files_in, "input", allow_dup_in)
+        allow_dup_in = st.checkbox("Allow Duplicates", value=False, key="dup_in")
+        
+        if st.button("Process Input", key="btn_in"):
+            # 合并文件源：上传的文件 + 刚拍的照片
+            all_files_in = []
+            if files_in_upload: all_files_in.extend(files_in_upload)
+            if cam_in: all_files_in.append(cam_in)
+            
+            if all_files_in:
+                process_and_save(all_files_in, "input", allow_dup_in)
+            else:
+                st.warning("Please upload a file or take a photo.")
+
     st.markdown("---")
     show_interactive_table("input")
 
 st.write("")
 
+# 板块 2: OUTPUT
 with st.container(border=True):
     st.markdown("### 📤 Output Invoices (Revenue)")
+    
     c1, c2 = st.columns([3, 1])
-    with c1: files_out = st.file_uploader("Upload Client Invoices", accept_multiple_files=True, key="out")
+    with c1: 
+        files_out_upload = st.file_uploader("Upload Files (PDF/Image)", accept_multiple_files=True, key="out_up")
+        with st.expander("📸 Take a Photo (Camera)"):
+            cam_out = st.camera_input("Snap Invoice", key="cam_out")
+            
     with c2: 
         st.write(""); st.write("")
-        if files_out and st.button("Process Output", key="btn_out"):
-            process_and_save(files_out, "output", allow_dup_out)
+        allow_dup_out = st.checkbox("Allow Duplicates", value=False, key="dup_out")
+        
+        if st.button("Process Output", key="btn_out"):
+            all_files_out = []
+            if files_out_upload: all_files_out.extend(files_out_upload)
+            if cam_out: all_files_out.append(cam_out)
+            
+            if all_files_out:
+                process_and_save(all_files_out, "output", allow_dup_out)
+            else:
+                st.warning("Please upload a file or take a photo.")
+
     st.markdown("---")
     show_interactive_table("output")
