@@ -7,12 +7,10 @@ import base64
 import re
 
 # --- 1. 全局配置 ---
-# 依然从 Secrets 读取 Key，如果没有配置 secrets，请手动替换下面的字符串
-# API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE" 
 try:
     API_KEY = st.secrets["GEMINI_KEY"]
 except:
-    API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE" # 备用硬编码
+    API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
 
 st.set_page_config(page_title="Project Quoter", layout="wide", page_icon="🏗️")
 
@@ -40,16 +38,17 @@ st.markdown("""
 # --- 3. 核心逻辑 ---
 
 def get_available_model():
-    # 优先找 Pro 模型以获得更好的推理能力
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
     try:
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
+            # 优先找 Pro (推理能力强)
             for model in data.get('models', []):
                 name = model['name'].replace('models/', '')
                 if 'pro' in name and 'generateContent' in model.get('supportedGenerationMethods', []):
                     return name
+            # 兜底 Flash
             for model in data.get('models', []):
                 name = model['name'].replace('models/', '')
                 if 'flash' in name and 'generateContent' in model.get('supportedGenerationMethods', []):
@@ -59,20 +58,15 @@ def get_available_model():
 
 def analyze_project_list(uploaded_file):
     model_name = get_available_model()
+    file_ext = uploaded_file.name.lower().split('.')[-1]
     
-    mime_type = "image/jpeg"
-    if uploaded_file.name.lower().endswith('.pdf'): mime_type = "application/pdf"
-    
-    bytes_data = uploaded_file.getvalue()
-    base64_data = base64.b64encode(bytes_data).decode('utf-8')
-    
-    # 核心 Prompt：要求 AI 做很多估算工作
-    prompt = """
+    # 通用 Prompt
+    prompt_base = """
     You are an expert Quantity Surveyor and Logistics Manager.
-    Task: Analyze the Project Product List (Image/PDF).
+    Task: Analyze the Project Product List.
     
     Requirements:
-    1. **Extract**: Item Name, Specification/Model, Quantity.
+    1. **Extract/Read**: Item Name, Specification/Model, Quantity.
     2. **Price Analysis (USD)**:
        - Estimate `china_price`: Average market price in China.
        - Estimate `sa_price`: Average market price in South Africa. (If unavailable/rare, set to 0).
@@ -93,22 +87,54 @@ def analyze_project_list(uploaded_file):
       }
     ]
     """
+
+    payload = {}
     
+    # === 分支 A: 处理 Excel (xlsx, xls) ===
+    if file_ext in ['xlsx', 'xls']:
+        try:
+            # 读取 Excel 内容转为字符串
+            df = pd.read_excel(uploaded_file)
+            # 将 DataFrame 转换为 CSV 格式的字符串，喂给 AI
+            excel_text = df.to_string(index=False)
+            
+            full_prompt = prompt_base + f"\n\n[DATA FROM UPLOADED EXCEL FILE]:\n{excel_text}"
+            payload = {"contents": [{"parts": [{"text": full_prompt}]}]}
+            
+        except Exception as e:
+            return [], f"Excel Read Error: {str(e)}"
+
+    # === 分支 B: 处理 图片/PDF ===
+    else:
+        mime_type = "image/jpeg"
+        if file_ext == 'pdf': mime_type = "application/pdf"
+        
+        bytes_data = uploaded_file.getvalue()
+        base64_data = base64.b64encode(bytes_data).decode('utf-8')
+        
+        payload = {"contents": [{"parts": [{"text": prompt_base}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
+
+    # === 发送请求 ===
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
     headers = {'Content-Type': 'application/json'}
-    payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
 
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if response.status_code == 200:
             res_json = response.json()
-            if 'candidates' not in res_json: return []
+            if 'candidates' not in res_json: return [], "No content returned."
             text = res_json['candidates'][0]['content']['parts'][0]['text']
+            
+            # 提取 JSON
             match = re.search(r'\[.*\]', text, re.DOTALL)
-            if match: return json.loads(match.group(0))
-            else: return []
-        else: return []
-    except Exception as e: return []
+            if match:
+                return json.loads(match.group(0)), None
+            else:
+                return [], text # 返回原始文本用于调试
+        else:
+            return [], f"API Error {response.status_code}"
+    except Exception as e:
+        return [], str(e)
 
 def calculate_logistics_and_price(df, freight_rate_per_ton):
     # 1. 清洗数据
@@ -116,38 +142,34 @@ def calculate_logistics_and_price(df, freight_rate_per_ton):
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
     # 2. 定价逻辑：如果 SA 价格不存在或为 0，则用 China * 2.5
-    # 我们可以创建一个 'final_unit_price'
     def get_final_price(row):
         if row['sa_price'] > 0:
-            return row['sa_price'] # 如果南非有市价，参考市价（或者您可以改为取两者最大值）
+            return row['sa_price'] 
         else:
-            return row['china_price'] * 2.5 # 否则用中国价格翻倍
+            return row['china_price'] * 2.5
 
     df['final_unit_price'] = df.apply(get_final_price, axis=1)
     df['subtotal_product'] = df['quantity'] * df['final_unit_price']
 
     # 3. 物流计算 (Superlink)
-    # Superlink 规格:
-    # 前车: 6m x 2.4m x 2.5m = 36 m3
-    # 后车: 12m x 2.4m x 2.5m = 72 m3
-    # 总容积: 108 m3 (保守估计打个9折装载率 -> 约 97 m3)
-    # 总限重: 34,000 kg
+    # 前车: 6m (36m3), 后车: 12m (72m3) -> 108m3 理论 -> 90%装载率 -> ~97m3
+    # 限重: 34T
     
     total_weight_kg = (df['quantity'] * df['weight_kg']).sum()
     total_volume_m3 = (df['quantity'] * df['volume_m3']).sum()
     
     truck_capacity_weight = 34000.0
-    truck_capacity_volume = 108.0 * 0.9 # 90% 装载率
+    truck_capacity_volume = 108.0 * 0.9 
     
-    # 需要几辆车？(取重量和体积需求的最大值)
+    # 车辆数量 = Max(重量需求, 体积需求)
     trucks_by_weight = total_weight_kg / truck_capacity_weight
     trucks_by_volume = total_volume_m3 / truck_capacity_volume
     num_trucks = math.ceil(max(trucks_by_weight, trucks_by_volume))
+    if num_trucks < 1: num_trucks = 1
     
-    if num_trucks < 1: num_trucks = 1 # 至少一辆
-    
-    # 4. 运费计算
-    # 运费 = 车数 * (单价 $500 * 34吨)
+    # 4. 运费计算 (每车运费 = 单价/吨 * 34吨)
+    # 注意：这里假设无论是否装满34吨，包车都是按34吨算钱（或按车次算）
+    # 您的需求是：车的单价默认值为 $500 x 34吨
     truck_cost_per_trip = freight_rate_per_ton * 34.0
     total_freight_cost = num_trucks * truck_cost_per_trip
     
@@ -163,79 +185,70 @@ def calculate_logistics_and_price(df, freight_rate_per_ton):
         "total_freight": total_freight_cost,
         "grand_total": total_project_value
     }
-    
     return df, summary
 
 # --- 4. 页面布局 ---
 
 st.markdown("""
 <div class="header-box">
-    <h2>🏗️ Project Quoter | 工程预算与物流调度</h2>
+    <h2>🏗️ Project Quoter | 工程预算 & 物流调度</h2>
 </div>
 """, unsafe_allow_html=True)
 
-# === 侧边栏 ===
 with st.sidebar:
     st.header("🚛 Logistics Settings")
-    
     st.info("Superlink Standard: 6m+12m Links\nMax Height: 2.5m | Max Load: 34T")
-    
-    # 运费变量
-    freight_rate = st.number_input("Freight Rate ($/Ton)", value=500.0, step=10.0, help="默认为 $500/吨")
-    
-    st.divider()
-    st.subheader("Pricing Strategy")
-    markup = st.slider("China Price Markup", 2.0, 4.0, 2.5, help="当南非无货时，中国价格乘以多少倍？默认2.5")
+    freight_rate = st.number_input("Freight Rate ($/Ton)", value=500.0, step=10.0, help="默认运费单价")
 
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    st.subheader("📄 Upload Project List (清单)")
-    uploaded_file = st.file_uploader("Upload Image/PDF/Excel", type=['png', 'jpg', 'jpeg', 'pdf'])
+    st.subheader("📄 Upload Project List (支持 Excel)")
+    # 【核心修改】支持 xlsx, xls
+    uploaded_file = st.file_uploader("Upload Image/PDF/Excel", type=['png', 'jpg', 'jpeg', 'pdf', 'xlsx', 'xls'])
     
     if uploaded_file and st.button("🚀 Analyze & Quote"):
-        with st.spinner("AI is checking prices in China & SA, and calculating truck loads..."):
-            raw_data = analyze_project_list(uploaded_file)
+        with st.spinner("AI is calculating prices and logistics..."):
+            raw_data, debug_msg = analyze_project_list(uploaded_file)
+            
             if raw_data:
                 st.session_state['project_data'] = pd.DataFrame(raw_data)
                 st.success("Analysis Complete!")
             else:
-                st.error("Failed to analyze. Please upload a clear image.")
+                st.error("Analysis Failed.")
+                if debug_msg:
+                    with st.expander("Show Error Details"):
+                        st.text(debug_msg)
 
 if 'project_data' in st.session_state:
     df = st.session_state['project_data']
     
     st.divider()
-    st.subheader("🛠️ 报价明细 (Quote Details)")
+    st.subheader("🛠️ 报价明细 (Data Editor)")
     
-    # 数据编辑器
     edited_df = st.data_editor(
         df,
         column_config={
-            "item": "Item Name",
-            "spec": "Specification",
+            "item": "Item",
+            "spec": "Spec",
             "quantity": "Qty",
-            "china_price": st.column_config.NumberColumn("China Price ($)", help="AI估算的中国出厂价"),
-            "sa_price": st.column_config.NumberColumn("SA Market ($)", help="南非本地价 (0代表无货)"),
-            "weight_kg": st.column_config.NumberColumn("Unit Kg", help="单件重量"),
-            "volume_m3": st.column_config.NumberColumn("Unit CBM", help="单件体积"),
-            "final_unit_price": st.column_config.NumberColumn("Quote Price ($)", disabled=True, help="系统生成的最终报价"),
+            "china_price": st.column_config.NumberColumn("China ($)", help="中国出厂价"),
+            "sa_price": st.column_config.NumberColumn("SA ($)", help="南非市价 (0=无货)"),
+            "weight_kg": st.column_config.NumberColumn("Kg/Unit"),
+            "volume_m3": st.column_config.NumberColumn("CBM/Unit"),
+            "final_unit_price": st.column_config.NumberColumn("Quote ($)", disabled=True),
         },
         num_rows="dynamic",
         use_container_width=True
     )
     
-    # 实时计算
     final_df, summary = calculate_logistics_and_price(edited_df, freight_rate)
     
     st.divider()
     
-    # === 结果展示区 ===
-    
-    # 1. 车辆调度卡片
-    st.subheader("🚛 Logistics Plan (物流方案)")
+    # 车辆调度结果
+    st.subheader("🚛 Logistics Plan")
     t1, t2, t3, t4 = st.columns(4)
-    
     with t1:
         st.markdown(f"""
         <div class="truck-card">
@@ -243,30 +256,22 @@ if 'project_data' in st.session_state:
             <p>Superlinks Required</p>
         </div>
         """, unsafe_allow_html=True)
-        
     with t2:
-        st.metric("Total Weight", f"{summary['total_weight_ton']:,.2f} Tons", help="总重量")
-        st.metric("Total Volume", f"{summary['total_volume_cbm']:,.2f} CBM", help="总体积")
-        
+        st.metric("Total Weight", f"{summary['total_weight_ton']:,.2f} Tons")
+        st.metric("Total Volume", f"{summary['total_volume_cbm']:,.2f} CBM")
     with t3:
-        st.metric("Truck Unit Cost", f"${summary['truck_cost_unit']:,.2f}", help=f"Single Truck Cost ({freight_rate} x 34T)")
-        
+        st.metric("Truck Unit Cost", f"${summary['truck_cost_unit']:,.2f}", help=f"{freight_rate} x 34T")
     with t4:
-        st.metric("Total Freight", f"${summary['total_freight']:,.2f}", help="总运费 = 车数 x 单车运费")
+        st.metric("Total Freight", f"${summary['total_freight']:,.2f}")
 
     st.divider()
     
-    # 2. 总报价单
-    st.subheader("💰 Final Quotation (总报价)")
-    
+    # 总价结果
+    st.subheader("💰 Final Quotation")
     m1, m2, m3 = st.columns(3)
-    with m1:
-        st.markdown(f"<div class='metric-box'><h4>Product Subtotal</h4><h2>${summary['total_product_value']:,.2f}</h2></div>", unsafe_allow_html=True)
-    with m2:
-        st.markdown(f"<div class='metric-box'><h4>Freight Cost</h4><h2>${summary['total_freight']:,.2f}</h2></div>", unsafe_allow_html=True)
-    with m3:
-        st.markdown(f"<div class='metric-box' style='border-left-color: #d32f2f;'><h4>Grand Total</h4><h2 style='color:#d32f2f'>${summary['grand_total']:,.2f}</h2></div>", unsafe_allow_html=True)
+    m1.markdown(f"<div class='metric-box'><h4>Product Subtotal</h4><h2>${summary['total_product_value']:,.2f}</h2></div>", unsafe_allow_html=True)
+    m2.markdown(f"<div class='metric-box'><h4>Freight Cost</h4><h2>${summary['total_freight']:,.2f}</h2></div>", unsafe_allow_html=True)
+    m3.markdown(f"<div class='metric-box' style='border-left-color: #d32f2f;'><h4>Grand Total</h4><h2 style='color:#d32f2f'>${summary['grand_total']:,.2f}</h2></div>", unsafe_allow_html=True)
 
-    # 下载按钮
     csv = final_df.to_csv(index=False).encode('utf-8')
     st.download_button("📄 Download Project Quote (CSV)", csv, "Project_Quote.csv")
