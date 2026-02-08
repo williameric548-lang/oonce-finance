@@ -82,7 +82,6 @@ def extract_invoice_data(uploaded_file, mode="input", model_choice="gemini-1.5-f
     }}
     """
     
-    # 这里的 URL 是关键，只使用稳定版模型
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_choice}:generateContent?key={API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
@@ -94,7 +93,7 @@ def extract_invoice_data(uploaded_file, mode="input", model_choice="gemini-1.5-f
             clean_text = text.replace('```json', '').replace('```', '').strip()
             return json.loads(clean_text)
         elif response.status_code == 404:
-            return {"error": f"Model '{model_choice}' not found (404). Please switch models in Sidebar."}
+            return {"status": 404, "error": f"Model '{model_choice}' not found."} # 特殊标记 404
         else:
             return {"error": f"API Error {response.status_code}"}
     except Exception as e: return {"error": str(e)}
@@ -129,8 +128,16 @@ def process_and_save(files, mode, allow_duplicates, model_name):
         fname = getattr(file, 'name', f"Photo_{datetime.now().strftime('%H%M%S')}.jpg")
         
         try:
+            # 【V21 核心改动】: 智能重试机制
+            # 1. 尝试用户选择的模型
             res = extract_invoice_data(file, mode=mode, model_choice=model_name)
             
+            # 2. 如果遇到 404 错误 (Pro 模型不可用)，自动切换回 Flash
+            if isinstance(res, dict) and res.get("status") == 404:
+                # 悄悄地重试，不报错
+                res = extract_invoice_data(file, mode=mode, model_choice="gemini-1.5-flash")
+            
+            # 3. 常规错误处理
             if not isinstance(res, dict):
                 failed_files.append(f"{fname} (系统响应异常)")
                 continue
@@ -256,17 +263,17 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 🧠 AI Engine")
     
-    # 【V20 修复】只保留最稳定的两个模型，去除不稳定的 2.0
+    # 默认选 Pro，如果 Pro 挂了，代码里会自动切 Flash
     model_option = st.selectbox(
         "Select Model",
-        ("gemini-1.5-flash", "gemini-1.5-pro"),
+        ("gemini-1.5-pro", "gemini-1.5-flash"),
         index=0,
-        help="Use 'Flash' for speed (Default). Use 'Pro' if accuracy is low."
+        help="Pro is more accurate. If it fails, system auto-switches to Flash."
     )
     st.caption(f"Active: {model_option}")
     
     st.markdown("---")
-    st.caption("System: OONCE v20.0 (Stable)")
+    st.caption("System: OONCE v21.0 (Auto-Fallback)")
 
 st.markdown("""
 <div class="brand-header">
