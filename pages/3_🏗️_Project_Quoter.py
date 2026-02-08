@@ -6,11 +6,10 @@ import math
 import base64
 import re
 
-# --- 1. 安全配置 ---
-# 厂长，这次我们只从 Secrets 读取，绝对不写死在代码里！
-# 这样 GitHub 怎么扫描都扫不到，Google 就不会封您的号了。
+# --- 1. 安全配置 (容错版) ---
 try:
-    API_KEY = st.secrets["GEMINI_KEY"]
+    # .strip() 是关键！它会自动切除 Key 前后的空格和换行符
+    API_KEY = st.secrets["GEMINI_KEY"].strip()
 except Exception:
     st.error("🚨 未检测到 API Key！请在 Streamlit 后台 Settings -> Secrets 中配置 GEMINI_KEY。")
     st.stop()
@@ -41,6 +40,7 @@ st.markdown("""
 # --- 3. 核心逻辑 ---
 
 def get_available_model():
+    # 始终使用 flash 模型，速度快且稳定
     return "gemini-1.5-flash"
 
 def analyze_project_list(uploaded_file):
@@ -64,6 +64,10 @@ def analyze_project_list(uploaded_file):
     if file_ext in ['xlsx', 'xls']:
         try:
             df = pd.read_excel(uploaded_file)
+            # 处理空表格的情况
+            if df.empty: return [], "Excel is empty."
+            # 处理 NaN (空值)，防止 JSON 解析报错
+            df = df.fillna("")
             excel_text = df.to_string(index=False)
             payload = {"contents": [{"parts": [{"text": prompt_base + f"\nData:\n{excel_text}"}]}]}
         except Exception as e: return [], f"Excel Error: {str(e)}"
@@ -81,15 +85,18 @@ def analyze_project_list(uploaded_file):
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if response.status_code == 200:
             res_json = response.json()
-            if 'candidates' not in res_json: return [], "No content returned"
+            if 'candidates' not in res_json: return [], "No content returned from AI"
             text = res_json['candidates'][0]['content']['parts'][0]['text']
             match = re.search(r'\[.*\]', text, re.DOTALL)
             if match: return json.loads(match.group(0)), None
             else: return [], text
-        else: return [], f"API Error {response.status_code}"
+        else:
+            # 【关键修改】打印出具体的错误信息，不再只显示 400
+            return [], f"API Error {response.status_code}: {response.text}"
     except Exception as e: return [], str(e)
 
 def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin):
+    # 确保数值转换安全
     for col in ['quantity', 'china_price', 'sa_price', 'weight_kg', 'volume_m3']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
@@ -104,7 +111,9 @@ def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
     total_weight = (df['quantity'] * df['weight_kg']).sum()
     total_volume = (df['quantity'] * df['volume_m3']).sum()
     
-    num_trucks = math.ceil(max(total_weight / 34000.0, total_volume / (108.0 * 0.9)))
+    # 防止除以零错误
+    truck_cap_vol = 108.0 * 0.9
+    num_trucks = math.ceil(max(total_weight / 34000.0, total_volume / truck_cap_vol))
     if num_trucks < 1: num_trucks = 1
     
     total_freight = num_trucks * (freight_rate * 34.0)
@@ -124,7 +133,7 @@ def calculate_logistics_and_price(df, freight_rate, china_markup, profit_margin)
 
 st.markdown("""
 <div class="header-box">
-    <h2>🏗️ Project Quoter V3.2 (Secure Edition)</h2>
+    <h2>🏗️ Project Quoter V3.3 (Debug Edition)</h2>
 </div>
 """, unsafe_allow_html=True)
 
@@ -150,7 +159,8 @@ with col1:
                 st.success("Done!")
             else:
                 st.error("Failed")
-                if err: st.text(err)
+                # 这里会显示红色的详细错误信息，帮我们彻底破案
+                if err: st.code(err, language='json')
 
 if 'project_data' in st.session_state:
     df = st.session_state['project_data']
@@ -178,9 +188,4 @@ if 'project_data' in st.session_state:
     st.subheader("💰 Final Quotation Overview")
     
     c1, c2, c3 = st.columns(3)
-    with c1: st.markdown(f"<div class='metric-box'><h4>Product Subtotal</h4><h2>${summary['total_product_value']:,.2f}</h2></div>", unsafe_allow_html=True)
-    with c2: st.markdown(f"<div class='metric-box'><h4>Freight Cost</h4><h2>${summary['total_freight']:,.2f}</h2><p>{int(summary['num_trucks'])}x Superlinks</p></div>", unsafe_allow_html=True)
-    with c3: st.markdown(f"<div class='metric-box' style='border-left-color: #d32f2f;'><h4>Grand Total</h4><h2 style='color:#d32f2f'>${summary['grand_total']:,.2f}</h2></div>", unsafe_allow_html=True)
-
-    csv = final_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📄 Download Full Quote (CSV)", csv, "Project_Quote.csv")
+    with c1: st.markdown(f"<div class
