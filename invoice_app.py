@@ -38,25 +38,23 @@ st.markdown("""
 
 # --- 3. 核心逻辑 ---
 
-# 【V23 核心回归】: 自动寻找可用的模型，不再写死
 def get_available_model():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
     try:
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            # 优先寻找 flash 模型，因为它快
+            # 优先寻找 flash
             for model in data.get('models', []):
                 name = model['name'].replace('models/', '')
                 if 'flash' in name and 'generateContent' in model.get('supportedGenerationMethods', []):
                     return name
-            # 如果没有 flash，随便找一个能用的 Pro
+            # 兜底
             for model in data.get('models', []):
                 if 'generateContent' in model.get('supportedGenerationMethods', []):
                     return model['name'].replace('models/', '')
     except:
         pass
-    # 如果自动寻找失败，才使用兜底方案
     return "gemini-1.5-flash"
 
 def get_historical_zar_rate(date_str):
@@ -70,7 +68,6 @@ def get_historical_zar_rate(date_str):
     except: return None
 
 def extract_invoice_data(uploaded_file, mode="input"):
-    # 动态获取模型
     model_name = get_available_model()
     
     mime_type = "image/jpeg"
@@ -88,7 +85,7 @@ def extract_invoice_data(uploaded_file, mode="input"):
     Task: Extract invoice data into JSON.
 
     CRITICAL INSTRUCTIONS FOR ACCURACY:
-    1. **TOTAL AMOUNT**: Look for "Total Due", "Balance Due", "Grand Total". Be extremely careful with decimal points (e.g., distinguish 100.00 from 10000).
+    1. **TOTAL AMOUNT**: Look for "Total Due", "Balance Due", "Grand Total". Be extremely careful with decimal points.
     2. **DATE**: Identify the main Invoice Date. Format: YYYY-MM-DD.
     3. **INVOICE NO**: Extract the unique Invoice Number.
     4. **{target_entity}**: Extract the full company name.
@@ -126,9 +123,14 @@ def load_existing_signatures(csv_file):
         try:
             df = pd.read_csv(csv_file)
             for _, row in df.iterrows():
+                # 1. 发票号去空格、转大写
                 inv_no = str(row.get('Invoice No', '')).strip().upper()
-                try: total = float(str(row.get('Total', 0)).replace(',', ''))
-                except: total = 0.0
+                try: 
+                    # 2. 【核心修复】金额强制保留2位小数，解决 6800.04000001 != 6800.04 问题
+                    raw_val = float(str(row.get('Total', 0)).replace(',', ''))
+                    total = round(raw_val, 2)
+                except: 
+                    total = 0.0
                 signatures.add((inv_no, total))
         except: pass
     return signatures
@@ -166,13 +168,15 @@ def process_and_save(files, mode, allow_duplicates):
                 currency = str(res.get("currency", "ZAR")).upper()
 
                 try:
-                    raw_subtotal = float(str(res.get("subtotal", 0)).replace(',', '').replace(' ', ''))
-                    raw_vat = float(str(res.get("vat", 0)).replace(',', '').replace(' ', ''))
-                    raw_total = float(str(res.get("total", 0)).replace(',', '').replace(' ', ''))
+                    # 3. 【核心修复】新读取的数据也强制保留2位小数
+                    raw_subtotal = round(float(str(res.get("subtotal", 0)).replace(',', '').replace(' ', '')), 2)
+                    raw_vat = round(float(str(res.get("vat", 0)).replace(',', '').replace(' ', '')), 2)
+                    raw_total = round(float(str(res.get("total", 0)).replace(',', '').replace(' ', '')), 2)
                 except:
                     failed_files.append(f"{fname} (金额识别失败)")
                     continue
 
+                # 4. 指纹比对 (现在两边都是2位小数，一定能匹配上)
                 signature = (raw_inv_no, raw_total)
                 is_duplicate_history = signature in existing_signatures
                 is_duplicate_batch = signature in current_batch_signatures
@@ -186,7 +190,9 @@ def process_and_save(files, mode, allow_duplicates):
                     "Invoice No": raw_inv_no,       
                     entity_label: raw_entity_name,  
                     "Currency": currency,           
-                    "Subtotal": 0.0, "VAT": 0.0, "Total": 0.0,
+                    "Subtotal": raw_subtotal, # 使用取整后的值
+                    "VAT": raw_vat, 
+                    "Total": raw_total,
                     "Total (USD)": "", "Exchange Rate": 1.0, 
                     "Validation": "", "File Name": fname
                 }
@@ -198,17 +204,21 @@ def process_and_save(files, mode, allow_duplicates):
                     rate = get_historical_zar_rate(row["Date"])
                     if not rate: rate = 1.0; row["Exchange Rate"] = "Error"
                     else: row["Exchange Rate"] = round(rate, 4)
+                    
+                    # 转换后的 ZAR 也要取整
                     converted_val = round(raw_subtotal * (rate if isinstance(rate, float) else 0), 2)
                     row["Subtotal"] = converted_val; row["VAT"] = 0.0; row["Total"] = converted_val
                     row["Total (USD)"] = raw_subtotal
+                    
                     if "DUPLICATE" not in row["Validation"]: row["Validation"] = "✅ USD Auto"
                 else:
                     row["Subtotal"] = raw_subtotal; row["VAT"] = raw_vat; row["Total"] = raw_total
                     row["Total (USD)"] = ""; row["Exchange Rate"] = 1.0
+                    
                     if "DUPLICATE" not in row["Validation"]:
                         calc_total = round(row["Subtotal"] + row["VAT"], 2)
-                        # V19 优化: 适当放宽校验误差
-                        if abs(calc_total - row["Total"]) < 0.15: row["Validation"] = "✅ OK"
+                        # V23: 放宽误差到 0.2 (20分)，防止极个别计算误差
+                        if abs(calc_total - row["Total"]) < 0.2: row["Validation"] = "✅ OK"
                         else: row["Validation"] = "❌ Math Error"
                 
                 results.append(row)
@@ -221,7 +231,7 @@ def process_and_save(files, mode, allow_duplicates):
 
         progress_bar.progress((i + 1) / len(files))
 
-    if skipped_files: st.toast(f"🚫 Skipped {len(skipped_files)} duplicates", icon="🔕")
+    if skipped_files: st.toast(f"🚫 已跳过 {len(skipped_files)} 个重复文件", icon="🔕")
     
     if failed_files:
         st.error(f"⚠️ 以下 {len(failed_files)} 个文件处理失败:")
@@ -275,7 +285,7 @@ with st.sidebar:
     st.divider()
     st.metric("Net Profit", f"R {net_profit:,.2f}", delta_color="normal" if net_profit>=0 else "inverse")
     st.markdown("---")
-    st.caption("System: OONCE v23.0 (Auto-Fix)")
+    st.caption("System: OONCE v24.0 (Duplicate Fix)")
 
 st.markdown("""
 <div class="brand-header">
