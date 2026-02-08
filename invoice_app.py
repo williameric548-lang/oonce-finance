@@ -14,22 +14,34 @@ FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
 
 # 设置页面
-st.set_page_config(page_title="OONCE Finance V9", layout="wide", page_icon="💹")
+st.set_page_config(page_title="OONCE Finance V10", layout="wide", page_icon="💹")
 
-# --- 2. CSS 美化 (含错误高亮样式) ---
+# --- 2. CSS 美化 (极简风格) ---
 st.markdown("""
 <style>
     .stApp { background-color: #F5F7F9; }
     h1 { color: #2C3E50; font-family: 'Helvetica Neue', sans-serif; font-weight: 700; text-align: center; padding-bottom: 20px; }
-    div.stButton > button { background-color: #27AE60; color: white; border-radius: 8px; border: none; padding: 10px 24px; font-weight: bold; box-shadow: 0 2px 5px rgba(0,0,0,0.1); width: 100%; }
-    div.stButton > button:hover { background-color: #1E8449; color: white; border: none; }
-    [data-testid="stVerticalBlockBorderWrapper"] { background-color: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border: 1px solid #E0E0E0; border-top: 5px solid #27AE60 !important; padding: 20px; }
-    .stAlert { background-color: #D4EFDF; color: #145A32; border: 1px solid #A9DFBF; }
-    .stException { background-color: #FADBD8; color: #922B21; border: 1px solid #F5B7B1; border-radius: 5px; padding: 10px; }
+    
+    /* 绿色按钮 */
+    div.stButton > button { background-color: #27AE60; color: white; border-radius: 8px; border: none; padding: 10px 24px; font-weight: bold; width: 100%; }
+    div.stButton > button:hover { background-color: #1E8449; color: white; }
+    
+    /* 容器样式 */
+    [data-testid="stVerticalBlockBorderWrapper"] { 
+        background-color: white; 
+        border-radius: 12px; 
+        box-shadow: 0 4px 15px rgba(0,0,0,0.05); 
+        border: 1px solid #E0E0E0; 
+        border-top: 5px solid #27AE60 !important; 
+        padding: 20px; 
+    }
+    
+    /* 调整 Toast 提示的位置 */
+    .stToast { position: fixed; top: 50px; right: 20px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. 核心逻辑 ---
+# --- 3. 核心逻辑 (保持不变) ---
 def get_available_model():
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
     try:
@@ -84,7 +96,7 @@ def extract_invoice_data(uploaded_file, mode="input"):
     except Exception as e:
         return {"Error": str(e)}
 
-# --- 4. 查重功能 ---
+# --- 4. 查重逻辑 ---
 def load_existing_signatures(csv_file):
     signatures = set()
     if os.path.exists(csv_file):
@@ -98,7 +110,7 @@ def load_existing_signatures(csv_file):
         except: pass
     return signatures
 
-def process_and_save(files, mode):
+def process_and_save(files, mode, allow_duplicates):
     csv_file = FILE_INPUT if mode == "input" else FILE_OUTPUT
     entity_label = "Vendor" if mode == "input" else "Client"
     key_name = "vendor" if mode == "input" else "client"
@@ -118,149 +130,137 @@ def process_and_save(files, mode):
             raw_total = float(str(res.get("total", 0)).replace(',', ''))
             currency = str(res.get("currency", "ZAR")).upper()
             
-            # 查重逻辑
+            # 查重判断
             current_signature = (raw_inv_no, raw_total)
-            if current_signature in existing_signatures:
-                skipped_files.append(f"📄 {file.name} (Inv: {raw_inv_no}, Amt: {raw_total})")
+            is_duplicate = current_signature in existing_signatures
+            
+            # 逻辑分支：
+            # 1. 如果是重复 且 用户没勾选“允许重复” -> 跳过
+            if is_duplicate and not allow_duplicates:
+                skipped_files.append(f"{file.name}")
+                continue
+            
+            # 2. 否则，开始录入
+            row = {
+                "Date": res.get("date"), "Invoice No": raw_inv_no,
+                entity_label: res.get(key_name), "Currency": currency,
+                "Subtotal": 0.0, "VAT": 0.0, "Total": 0.0,
+                "Total (USD)": "", "Exchange Rate": 1.0, 
+                "Validation": "", 
+                "File Name": file.name # 使用当前新文件的名字
+            }
+
+            # 标记重复
+            if is_duplicate and allow_duplicates:
+                row["Validation"] = "⚠️ DUPLICATE"
+            
+            # 汇率处理
+            if "USD" in currency:
+                rate = get_historical_zar_rate(row["Date"])
+                if not rate: rate = 1.0; row["Exchange Rate"] = "Error"
+                else: row["Exchange Rate"] = round(rate, 4)
+                converted_val = round(raw_subtotal * (rate if isinstance(rate, float) else 0), 2)
+                row["Subtotal"] = converted_val; row["VAT"] = 0.0; row["Total"] = converted_val
+                row["Total (USD)"] = raw_subtotal
+                if not is_duplicate: row["Validation"] = "✅ USD Auto"
             else:
-                row = {
-                    "Date": res.get("date"), "Invoice No": raw_inv_no,
-                    entity_label: res.get(key_name), "Currency": currency,
-                    "Subtotal": 0.0, "VAT": 0.0, "Total": 0.0,
-                    "Total (USD)": "", "Exchange Rate": 1.0, 
-                    "Validation": "", # 新增校验列
-                    "File Name": file.name
-                }
-
-                # 汇率处理
-                if "USD" in currency:
-                    rate = get_historical_zar_rate(row["Date"])
-                    if not rate: rate = 1.0; row["Exchange Rate"] = "Error"
-                    else: row["Exchange Rate"] = round(rate, 4)
-                    
-                    converted_val = round(raw_subtotal * (rate if isinstance(rate, float) else 0), 2)
-                    row["Subtotal"] = converted_val; row["VAT"] = 0.0; row["Total"] = converted_val
-                    row["Total (USD)"] = raw_subtotal
-                else:
-                    row["Subtotal"] = raw_subtotal; row["VAT"] = raw_vat; row["Total"] = raw_total
-                    row["Total (USD)"] = ""; row["Exchange Rate"] = 1.0
-                
-                # 【关键新增】审计校验逻辑 (Subtotal + VAT vs Total)
-                # 注意：我们校验的是原始识别数据，还是转换后的数据？
-                # 财务原则：应该校验“票面原始数据”。但如果是 USD 转 ZAR，Total=Subtotal，校验无意义。
-                # 所以我们只对 ZAR (本位币/原始币) 发票进行强校验。
-                
-                if "USD" in currency:
-                    row["Validation"] = "✅ USD Auto" # 美元自动转换，默认通过
-                else:
-                    # 校验 ZAR 发票的数学关系
+                row["Subtotal"] = raw_subtotal; row["VAT"] = raw_vat; row["Total"] = raw_total
+                row["Total (USD)"] = ""; row["Exchange Rate"] = 1.0
+                if not is_duplicate:
                     calc_total = round(row["Subtotal"] + row["VAT"], 2)
-                    diff = abs(calc_total - row["Total"])
-                    
-                    if diff < 0.05: # 允许 5分钱 误差
-                        row["Validation"] = "✅ OK"
-                    else:
-                        row["Validation"] = "❌ Check" # 数学不对
+                    if abs(calc_total - row["Total"]) < 0.05: row["Validation"] = "✅ OK"
+                    else: row["Validation"] = "❌ Math Error"
 
-                results.append(row)
-                existing_signatures.add(current_signature)
+            results.append(row)
+            # 如果允许重复录入，我们暂时不更新指纹库，或者更新都行，这里选择不强制拦截后续
+            # existing_signatures.add(current_signature) 
 
         progress_bar.progress((i + 1) / len(files))
 
+    # 反馈结果
     if skipped_files:
-        st.error(f"⚠️ {len(skipped_files)} Duplicates Skipped:")
-        for msg in skipped_files: st.write(msg)
+        st.warning(f"🚫 已跳过 {len(skipped_files)} 个重复文件 (如需录入请勾选上方开关): {', '.join(skipped_files)}")
 
     if results:
-        st.success(f"✅ {len(results)} New Invoices Processed!")
+        st.success(f"✅ 已录入 {len(results)} 个文件")
         df = pd.DataFrame(results)
         
-        # 列排序，加入 Validation
+        # 强制排序
         core_cols = ["Date", "Invoice No", entity_label, "Subtotal", "VAT", "Total", "Currency"]
         extra_cols = ["Validation", "File Name", "Total (USD)", "Exchange Rate"]
         df = df[core_cols + extra_cols]
         
-        # 样式高亮：如果 Validation 是 '❌ Check'，整行变色 (Streamlit DataFrame 样式)
-        def highlight_error(row):
-            if "❌" in str(row['Validation']):
-                return ['background-color: #FADBD8'] * len(row) # 红色背景
-            return [''] * len(row)
-
-        st.dataframe(df.style.apply(highlight_error, axis=1), use_container_width=True)
-        
+        # 保存到 CSV
         if os.path.exists(csv_file): df.to_csv(csv_file, mode='a', header=False, index=False, encoding='utf-8-sig')
         else: df.to_csv(csv_file, mode='w', header=True, index=False, encoding='utf-8-sig')
-        time.sleep(2); st.rerun()
+        
+        time.sleep(1)
+        st.rerun()
 
-def show_history_table(mode):
+# --- 5. 交互式表格组件 (可删除/编辑) ---
+def show_interactive_table(mode):
     csv_file = FILE_INPUT if mode == "input" else FILE_OUTPUT
     if os.path.exists(csv_file):
         df = pd.read_csv(csv_file)
-        # 对历史记录也应用高亮
-        def highlight_error(row):
-            if "❌" in str(row.get('Validation', '')):
-                return ['background-color: #FADBD8'] * len(row)
-            return [''] * len(row)
-            
-        st.dataframe(df.tail(10).style.apply(highlight_error, axis=1), use_container_width=True)
-        c1, c2 = st.columns([1, 4])
-        with c1: st.download_button(f"📥 CSV", df.to_csv(index=False).encode('utf-8-sig'), f"OONCE_{mode.upper()}.csv", use_container_width=True)
-        with c2: 
-            if st.button(f"🗑️ Clear", key=f"clr_{mode}"): os.remove(csv_file); st.rerun()
+        
+        st.write("📝 **History Editor (Tick box to delete rows)**")
+        
+        # 使用 data_editor 允许删除行 (num_rows="dynamic")
+        edited_df = st.data_editor(
+            df,
+            key=f"editor_{mode}",
+            num_rows="dynamic", # 允许增删行
+            use_container_width=True, # 铺满宽度
+            hide_index=True,
+            column_config={
+                "Validation": st.column_config.TextColumn("Status", help="Check for Errors"),
+            }
+        )
 
-def calculate_metrics():
-    total_in = 0.0; total_out = 0.0
-    if os.path.exists(FILE_INPUT):
-        try: total_in = pd.read_csv(FILE_INPUT)['Total'].sum()
-        except: pass
-    if os.path.exists(FILE_OUTPUT):
-        try: total_out = pd.read_csv(FILE_OUTPUT)['Total'].sum()
-        except: pass
-    return total_in, total_out
+        # 比较是否有修改
+        if not df.equals(edited_df):
+            if st.button(f"💾 Save Changes ({mode.upper()})", key=f"save_{mode}"):
+                edited_df.to_csv(csv_file, index=False, encoding='utf-8-sig')
+                st.success("✅ Changes Saved!")
+                time.sleep(1)
+                st.rerun()
 
-# --- 5. 页面布局 ---
+        # 下载按钮
+        st.download_button(f"📥 Download CSV", df.to_csv(index=False).encode('utf-8-sig'), f"OONCE_{mode.upper()}.csv")
+    else:
+        st.info("No records yet.")
+
+# --- 6. 页面布局 ---
 
 st.title("🏭 OONCE Finance Automation")
 st.markdown("---")
-
-tot_in, tot_out = calculate_metrics()
-net_profit = tot_out - tot_in
-
-col_m1, col_m2, col_m3 = st.columns(3)
-with col_m1:
-    with st.container(border=True):
-        st.markdown(f"<h4 style='color:#7f8c8d; margin:0;'>📉 Total Cost (Input)</h4>", unsafe_allow_html=True)
-        st.markdown(f"<h2 style='color:#2C3E50; margin:0;'>R {tot_in:,.2f}</h2>", unsafe_allow_html=True)
-with col_m2:
-    with st.container(border=True):
-        st.markdown(f"<h4 style='color:#7f8c8d; margin:0;'>📈 Total Revenue (Output)</h4>", unsafe_allow_html=True)
-        st.markdown(f"<h2 style='color:#2C3E50; margin:0;'>R {tot_out:,.2f}</h2>", unsafe_allow_html=True)
-with col_m3:
-    color = "#27AE60" if net_profit >= 0 else "#E74C3C"
-    with st.container(border=True):
-        st.markdown(f"<h4 style='color:#7f8c8d; margin:0;'>💰 Net Profit</h4>", unsafe_allow_html=True)
-        st.markdown(f"<h2 style='color:{color}; margin:0;'>R {net_profit:,.2f}</h2>", unsafe_allow_html=True)
-
-st.write("") 
 
 col_left, col_right = st.columns(2, gap="large")
 
 with col_left:
     with st.container(border=True): 
         st.subheader("📥 Input Invoices (Cost)")
-        st.caption("Suppliers / Bills / Expenses")
+        
+        # 查重开关
+        allow_dup_in = st.checkbox("🔘 Allow Duplicates (Mark as Warning)", value=False, key="check_in")
+        
         files_in = st.file_uploader("Upload Vendor Invoices", accept_multiple_files=True, key="in")
         if files_in and st.button("Process Input", key="btn_in"):
-            process_and_save(files_in, "input")
+            process_and_save(files_in, "input", allow_dup_in)
+        
         st.markdown("---")
-        show_history_table("input")
+        show_interactive_table("input")
 
 with col_right:
     with st.container(border=True):
         st.subheader("📤 Output Invoices (Revenue)")
-        st.caption("Clients / Sales / Incomes")
+        
+        # 查重开关
+        allow_dup_out = st.checkbox("🔘 Allow Duplicates (Mark as Warning)", value=False, key="check_out")
+        
         files_out = st.file_uploader("Upload Client Invoices", accept_multiple_files=True, key="out")
         if files_out and st.button("Process Output", key="btn_out"):
-            process_and_save(files_out, "output")
+            process_and_save(files_out, "output", allow_dup_out)
+        
         st.markdown("---")
-        show_history_table("output")
+        show_interactive_table("output")
