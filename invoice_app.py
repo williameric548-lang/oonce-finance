@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 API_KEY = "AIzaSyA0esre-3yI-sXogx-GWtbNC6dhRw2LzVE"
 FILE_INPUT = "oonce_input_v4.csv"
 FILE_OUTPUT = "oonce_output_v4.csv"
+# 强制锁定最稳定的模型
+MODEL_NAME = "gemini-1.5-flash"
 
 # 设置页面
 st.set_page_config(page_title="OONCE Finance", layout="wide", page_icon="📈")
@@ -48,7 +50,7 @@ def get_historical_zar_rate(date_str):
         return None
     except: return None
 
-def extract_invoice_data(uploaded_file, mode="input", model_choice="gemini-1.5-flash"):
+def extract_invoice_data(uploaded_file, mode="input"):
     mime_type = "image/jpeg"
     if hasattr(uploaded_file, 'name') and uploaded_file.name.lower().endswith('.pdf'): 
         mime_type = "application/pdf"
@@ -59,6 +61,7 @@ def extract_invoice_data(uploaded_file, mode="input", model_choice="gemini-1.5-f
     target_entity = "Vendor/Supplier Name" if mode == "input" else "Client/Customer Name"
     entity_key = "vendor" if mode == "input" else "client"
     
+    # 使用加强版的 Prompt，但配合稳定的模型
     prompt = f"""
     You are an expert financial auditor OCR system. 
     Task: Extract invoice data into JSON.
@@ -82,18 +85,17 @@ def extract_invoice_data(uploaded_file, mode="input", model_choice="gemini-1.5-f
     }}
     """
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_choice}:generateContent?key={API_KEY}"
+    # 恢复为最简单的调用方式
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
     headers = {'Content-Type': 'application/json'}
     payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": mime_type, "data": base64_data}}]}]}
 
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=120)
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
         if response.status_code == 200:
             text = response.json()['candidates'][0]['content']['parts'][0]['text']
             clean_text = text.replace('```json', '').replace('```', '').strip()
             return json.loads(clean_text)
-        elif response.status_code == 404:
-            return {"status": 404, "error": f"Model '{model_choice}' not found."} # 特殊标记 404
         else:
             return {"error": f"API Error {response.status_code}"}
     except Exception as e: return {"error": str(e)}
@@ -111,7 +113,7 @@ def load_existing_signatures(csv_file):
         except: pass
     return signatures
 
-def process_and_save(files, mode, allow_duplicates, model_name):
+def process_and_save(files, mode, allow_duplicates):
     csv_file = FILE_INPUT if mode == "input" else FILE_OUTPUT
     entity_label = "Vendor" if mode == "input" else "Client"
     key_name = "vendor" if mode == "input" else "client"
@@ -128,16 +130,9 @@ def process_and_save(files, mode, allow_duplicates, model_name):
         fname = getattr(file, 'name', f"Photo_{datetime.now().strftime('%H%M%S')}.jpg")
         
         try:
-            # 【V21 核心改动】: 智能重试机制
-            # 1. 尝试用户选择的模型
-            res = extract_invoice_data(file, mode=mode, model_choice=model_name)
+            res = extract_invoice_data(file, mode=mode)
             
-            # 2. 如果遇到 404 错误 (Pro 模型不可用)，自动切换回 Flash
-            if isinstance(res, dict) and res.get("status") == 404:
-                # 悄悄地重试，不报错
-                res = extract_invoice_data(file, mode=mode, model_choice="gemini-1.5-flash")
-            
-            # 3. 常规错误处理
+            # V18 防崩溃逻辑
             if not isinstance(res, dict):
                 failed_files.append(f"{fname} (系统响应异常)")
                 continue
@@ -193,6 +188,7 @@ def process_and_save(files, mode, allow_duplicates, model_name):
                     row["Total (USD)"] = ""; row["Exchange Rate"] = 1.0
                     if "DUPLICATE" not in row["Validation"]:
                         calc_total = round(row["Subtotal"] + row["VAT"], 2)
+                        # V19 优化: 适当放宽校验误差，避免1分钱报错
                         if abs(calc_total - row["Total"]) < 0.15: row["Validation"] = "✅ OK"
                         else: row["Validation"] = "❌ Math Error"
                 
@@ -206,7 +202,7 @@ def process_and_save(files, mode, allow_duplicates, model_name):
 
         progress_bar.progress((i + 1) / len(files))
 
-    if skipped_files: st.toast(f"🚫 已跳过 {len(skipped_files)} 个重复文件", icon="🔕")
+    if skipped_files: st.toast(f"🚫 Skipped {len(skipped_files)} duplicates", icon="🔕")
     
     if failed_files:
         st.error(f"⚠️ 以下 {len(failed_files)} 个文件处理失败:")
@@ -259,21 +255,8 @@ with st.sidebar:
     st.metric("Total Revenue (Output)", f"R {tot_out:,.2f}", delta="+Rev")
     st.divider()
     st.metric("Net Profit", f"R {net_profit:,.2f}", delta_color="normal" if net_profit>=0 else "inverse")
-    
     st.markdown("---")
-    st.markdown("### 🧠 AI Engine")
-    
-    # 默认选 Pro，如果 Pro 挂了，代码里会自动切 Flash
-    model_option = st.selectbox(
-        "Select Model",
-        ("gemini-1.5-pro", "gemini-1.5-flash"),
-        index=0,
-        help="Pro is more accurate. If it fails, system auto-switches to Flash."
-    )
-    st.caption(f"Active: {model_option}")
-    
-    st.markdown("---")
-    st.caption("System: OONCE v21.0 (Auto-Fallback)")
+    st.caption("System: OONCE v22.0 (Classic Stable)")
 
 st.markdown("""
 <div class="brand-header">
@@ -304,7 +287,7 @@ with st.container(border=True):
             if cam_in: all_files_in.append(cam_in)
             
             if all_files_in:
-                process_and_save(all_files_in, "input", allow_dup_in, model_option)
+                process_and_save(all_files_in, "input", allow_dup_in)
             else:
                 st.warning("Please upload a file or take a photo.")
 
@@ -332,7 +315,7 @@ with st.container(border=True):
             if cam_out: all_files_out.append(cam_out)
             
             if all_files_out:
-                process_and_save(all_files_out, "output", allow_dup_out, model_option)
+                process_and_save(all_files_out, "output", allow_dup_out)
             else:
                 st.warning("Please upload a file or take a photo.")
 
