@@ -5,23 +5,22 @@ import matplotlib.patches as patches
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="Multi-Truck Packing System", layout="wide")
-st.title("🚛 货物多车连续装载系统 (Superlink / Tri-axle 混合智能调配版)")
+st.title("🚛 货物多车连续装载系统 (全局重组与运力极简版)")
 
 # =========================================================
-# ⚙️ 1. 车型规格与混合车队参数设置
+# ⚙️ 1. 车型规格与参数配置
 # =========================================================
 st.sidebar.header("⚙️ 1. 车队规格与车辆数量")
 primary_truck_type = st.sidebar.radio("默认首选车型", ["Superlink (双挂)", "Tri-axle (三轴单挂)"])
 max_truck_count = st.sidebar.number_input("允许调配的最大总车辆数 (辆)", min_value=1, max_value=20, value=5, step=1)
 
-# 如果主选 Superlink，开启自动变通开关
 enable_triaxle_fallback = False
 if primary_truck_type == "Superlink (双挂)":
-    enable_triaxle_fallback = st.sidebar.checkbox("💡 允许在 Superlink 无法装下时，自动启用 Tri-axle 接力装载", value=True)
+    enable_triaxle_fallback = st.sidebar.checkbox("💡 开启 Tri-axle 补位与前车货物逆向重组优化 (减少总车辆数)", value=True)
 
 st.sidebar.markdown("---")
 
-# 1. Superlink 参数配置
+# Superlink 参数配置
 st.sidebar.subheader("🚛 Superlink (双挂) 参数")
 f_l = st.sidebar.number_input("前板长 (m)", value=6.0, step=0.1, key="f_l")
 f_w = st.sidebar.number_input("前板宽 (m)", value=2.7, step=0.05, key="f_w")
@@ -38,7 +37,7 @@ superlink_decks = [
     {"name": "后面板", "en_name": "Rear Deck", "L": r_l, "W": r_w, "H": r_h, "MaxW": r_m}
 ]
 
-# 2. Tri-axle 参数配置
+# Tri-axle 参数配置
 st.sidebar.subheader("🚚 Tri-axle (三轴单挂) 参数")
 t_l = st.sidebar.number_input("单挂长 (m)", value=12.0, step=0.1, key="t_l")
 t_w = st.sidebar.number_input("单挂宽 (m)", value=2.7, step=0.05, key="t_w")
@@ -71,7 +70,7 @@ else:
 cargo_df = st.data_editor(df_input, num_rows="dynamic", use_container_width=True, key="cargo_editor")
 
 # =========================================================
-# 🧮 3. 核心算法：混合车队连续装载与混合接力判断
+# 🧮 3. 核心算法：带全局重组（Re-allocation）的智能排布引擎
 # =========================================================
 items_pool = []
 seq_counter = 1
@@ -87,7 +86,6 @@ for _, row in cargo_df.iterrows():
         })
         seq_counter += 1
 
-# 硬性预筛 (取两类车型中的最大容限)
 global_max_h = max(f_h, r_h, t_h)
 global_max_w = max(f_w, r_w, t_w)
 global_max_l = max(f_l, r_l, t_l)
@@ -98,7 +96,7 @@ final_failed_items = []
 
 for item in items_pool:
     if item["h"] > global_max_h:
-        final_failed_items.append({**item, "最终拒绝原因": f"高度 ({item['h']}m) 超过所有可用卡车最高限制 ({global_max_h}m)"})
+        final_failed_items.append({**item, "最终拒绝原因": f"高度 ({item['h']}m) 超过卡车最高限制 ({global_max_h}m)"})
         continue
     fit_normal = (item["l"] <= global_max_l and item["w"] <= global_max_w)
     fit_swapped = (item["w"] <= global_max_l and item["l"] <= global_max_w)
@@ -111,10 +109,9 @@ for item in items_pool:
 
     valid_items.append(item)
 
-# 优先按底面积降序排列
 valid_items.sort(key=lambda x: (x["l"] * x["w"], max(x["l"], x["w"])), reverse=True)
 
-# 挂板装载子函数
+# 挂板装载核心子函数
 def pack_deck_rows(deck_info, unpacked_list, truck_name):
     d_l, d_w, d_h, d_max_w = deck_info["L"], deck_info["W"], deck_info["H"], deck_info["MaxW"]
     deck_weight = 0.0
@@ -170,6 +167,7 @@ def pack_deck_rows(deck_info, unpacked_list, truck_name):
         y_offset = (d_w - curr_y) / 2.0
         for r_item in row_items:
             placed_items.append({
+                "item_raw": r_item["item_ref"],
                 "序号": r_item["seq"],
                 "货物编码": r_item["code"],
                 "归属车辆": truck_name,
@@ -193,45 +191,62 @@ def pack_deck_rows(deck_info, unpacked_list, truck_name):
 
 truck_results = []
 unpacked_items = valid_items.copy()
-
 current_type = primary_truck_type
-fallback_started_at = None
+reallocated_info = []
 
 for truck_idx in range(1, max_truck_count + 1):
     if not unpacked_items:
         break
-        
-    # 判断是否需要切换到 Tri-axle 补位机制
+
+    # 判断 Superlink 装不下时，是否开启全局逆向“借调重组”
     if primary_truck_type == "Superlink (双挂)" and enable_triaxle_fallback and current_type == "Superlink (双挂)":
-        # 预检 Superlink 是否能装下至少一件剩余货物
-        can_superlink_fit_any = False
+        can_fit_superlink = False
         for item in unpacked_items:
             for d in superlink_decks:
                 if item["h"] <= d["H"] and item["weight"] <= d["MaxW"]:
                     if (item["l"] <= d["L"] and item["w"] <= d["W"]) or (item["w"] <= d["L"] and item["l"] <= d["W"]):
-                        can_superlink_fit_any = True
+                        can_fit_superlink = True
                         break
-            if can_superlink_fit_any:
+            if can_fit_superlink:
                 break
                 
-        # 如果 Superlink 的挂板尺寸完全装不下剩下的货物，切换为 Tri-axle 变通模式
-        if not can_superlink_fit_any:
+        # 触发重组逻辑
+        if not can_fit_superlink:
             current_type = "Tri-axle (三轴单挂)"
-            fallback_started_at = truck_idx
+            
+            # 从已装前的 Superlink 里提取部分轻便/常规货物与当前大件拼在一辆 Tri-axle 上
+            stolen_items = []
+            for tr in reversed(truck_results):
+                if "Superlink" in tr["truck_name"]:
+                    # 将该车部分或全部货物临时放入“可合并池”
+                    candidate_stolen = [item_entry["item_raw"] for item_entry in tr["items"]]
+                    
+                    # 测试这些被借调的货物与当前未装货物一起能否塞入一辆 Tri-axle
+                    test_combined = unpacked_items + candidate_stolen
+                    test_combined.sort(key=lambda x: (x["l"] * x["w"], max(x["l"], x["w"])), reverse=True)
+                    
+                    test_placed, test_removed = pack_deck_rows(triaxle_decks[0], test_combined, "TestTruck")
+                    
+                    # 如果能明显提升装载密度（把借调货物和超规大件装进同一辆车），执行借调并消灭前车
+                    if len(test_removed) > len(unpacked_items):
+                        stolen_items.extend(candidate_stolen)
+                        truck_results.remove(tr) # 消除原前面的 Superlink，减少总车数！
+                        reallocated_info.append(f"成功将前面【{tr['truck_name']}】的货物借调重组，消灭了该 Superlink 车辆！")
+                        break
 
-    # 构建当前车辆标签
+            unpacked_items.extend(stolen_items)
+            unpacked_items.sort(key=lambda x: (x["l"] * x["w"], max(x["l"], x["w"])), reverse=True)
+
     if current_type == "Superlink (双挂)":
         truck_name = f"车辆 #{truck_idx} (Superlink)"
         truck_en_name = f"Truck #{truck_idx} (Superlink)"
         active_decks = superlink_decks
     else:
-        tag = "Tri-axle - 变通补位" if fallback_started_at else "Tri-axle"
-        truck_name = f"车辆 #{truck_idx} ({tag})"
+        truck_name = f"车辆 #{truck_idx} (Tri-axle - 重组优化版)"
         truck_en_name = f"Truck #{truck_idx} (Tri-axle)"
         active_decks = triaxle_decks
 
     current_truck_success = []
-    
     for d_info in active_decks:
         placed, removed = pack_deck_rows(d_info, unpacked_items, truck_name)
         current_truck_success.extend(placed)
@@ -243,45 +258,17 @@ for truck_idx in range(1, max_truck_count + 1):
             "truck_name": truck_name,
             "truck_en_name": truck_en_name,
             "truck_id": truck_idx,
-            "type": current_type,
             "items": current_truck_success,
             "deck_configs": active_decks
         })
     else:
-        # 如果当前车型的所有板子都装不下任何一件货物，且允许变通，切换类型重试
-        if current_type == "Superlink (双挂)" and enable_triaxle_fallback:
-            current_type = "Tri-axle (三轴单挂)"
-            fallback_started_at = truck_idx
-            
-            truck_name = f"车辆 #{truck_idx} (Tri-axle - 变通补位)"
-            truck_en_name = f"Truck #{truck_idx} (Tri-axle)"
-            active_decks = triaxle_decks
-            
-            for d_info in active_decks:
-                placed, removed = pack_deck_rows(d_info, unpacked_items, truck_name)
-                current_truck_success.extend(placed)
-                for rm in removed:
-                    unpacked_items.remove(rm)
-                    
-            if current_truck_success:
-                truck_results.append({
-                    "truck_name": truck_name,
-                    "truck_en_name": truck_en_name,
-                    "truck_id": truck_idx,
-                    "type": current_type,
-                    "items": current_truck_success,
-                    "deck_configs": active_decks
-                })
-            else:
-                break
-        else:
-            break
+        break
 
 for item in unpacked_items:
-    final_failed_items.append({**item, "最终拒绝原因": f"调配的 {max_truck_count} 辆车容积/载重耗尽，仍无法装入"})
+    final_failed_items.append({**item, "最终拒绝原因": f"调配的 {max_truck_count} 辆车用尽，仍无法装入"})
 
 # =========================================================
-# 📊 4. 结果汇总表格展现 (中文)
+# 📊 4. 结果汇总表格展现
 # =========================================================
 st.header("📊 3. 多车配载结果汇总")
 
@@ -302,11 +289,12 @@ df_final_failed = pd.DataFrame(final_failed_items)
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("已成功调配车辆", f"{len(truck_results)} / {max_truck_count} 辆")
 col2.metric("Superlink 数量", f"{superlink_count} 辆")
-col3.metric("Tri-axle 数量", f"{triaxle_count} 辆" if triaxle_count == 0 else f"{triaxle_count} 辆 (补位)")
+col3.metric("Tri-axle 数量", f"{triaxle_count} 辆" if triaxle_count == 0 else f"{triaxle_count} 辆 (重组)")
 col4.metric("最终无法装载件数", f"{len(df_final_failed)} 件", delta_color="inverse")
 
-if fallback_started_at:
-    st.info(f"💡 **车辆变通提示：** 从 **`车辆 #{fallback_started_at}`** 开始，由于 Superlink 板长/载重限制放不下剩余件，系统已自动切换为 **Tri-axle** 进阶装载！")
+if reallocated_info:
+    for info in reallocated_info:
+        st.success(f"🎯 **全局重组优化成功：** {info}")
 
 st.subheader("🟢 多车成功配载清单")
 if not df_all_success.empty:
@@ -359,7 +347,6 @@ if truck_results:
 
     colors_palette = ['#2563eb', '#059669', '#d97706', '#7c3aed', '#db2777', '#0891b2']
 
-    # --- 3D 渲染 (Plotly) ---
     with tab_3d:
         for deck in selected_truck_data["deck_configs"]:
             d_name = deck["name"]
@@ -388,7 +375,6 @@ if truck_results:
             )
             st.plotly_chart(fig3d, use_container_width=True)
 
-    # --- 2D 俯视图渲染 (纯英文标记，彻底避免字符方框乱码) ---
     with tab_2d:
         fig2d, axes = plt.subplots(len(selected_truck_data["deck_configs"]), 1, figsize=(10, 3.8 * len(selected_truck_data["deck_configs"])))
         if len(selected_truck_data["deck_configs"]) == 1:
