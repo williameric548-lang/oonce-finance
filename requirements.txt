@@ -4,3 +4,5 @@ requests
 yfinance
 openpyxl
 duckduckgo-search
+matplotlib
+plotly
