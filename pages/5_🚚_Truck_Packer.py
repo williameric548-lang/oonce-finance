@@ -5,31 +5,40 @@ import matplotlib.patches as patches
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="Multi-Truck Packing System", layout="wide")
-st.title("🚛 货物多车连续装载系统 (双层堆叠与混合排布版)")
+st.title("🚛 货物多车连续装载系统 (100辆大车队混合排布版)")
 
 # =========================================================
-# ⚙️ 1. 车型规格与堆叠参数配置
+# ⚙️ 1. 车型规格与参数配置 (支持最高 100 辆车调配)
 # =========================================================
 st.sidebar.header("⚙️ 1. 车队规格与装载限制")
 primary_truck_type = st.sidebar.radio("默认首选车型", ["Superlink (双挂)", "Tri-axle (三轴单挂)"])
-max_truck_count = st.sidebar.number_input("允许调配的最大总车辆数 (辆)", min_value=1, max_value=20, value=7, step=1)
+
+# 🚀 突破限制：允许最大调配车辆数提升至 100 辆
+max_truck_count = st.sidebar.number_input(
+    "允许调配的最大总车辆数 (辆)", 
+    min_value=1, 
+    max_value=100, 
+    value=10, 
+    step=1,
+    help="最高支持 100 辆大车队连续装载排布"
+)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🏗️ 堆叠规则控制")
+st.sidebar.subheader("🏗️ 堆叠与重组规则")
 
-# 核心开关：选择是否开启高度堆叠
+# 双层堆叠控制
 enable_stacking = st.sidebar.checkbox("📦 允许货物双层堆叠 (Double Stacking, 最多2层)", value=False)
 
 if enable_stacking:
-    st.sidebar.info("💡 **堆叠规则已生效：**\n1. 最多2层，严禁3层\n2. 底层组合高度必须平整\n3. 上层底面不可悬空\n4. 上层允许长宽调换，高度固定\n5. 总高不超过车厢限制")
+    st.sidebar.info("💡 **双层堆叠约束生效：**\n1. 最多2层 (L1/L2)\n2. 底层组合高度需平整\n3. 上层底面不可悬空\n4. 上层高度不可旋转\n5. 总高不超过车厢限制")
 
 enable_triaxle_fallback = False
 if primary_truck_type == "Superlink (双挂)":
-    enable_triaxle_fallback = st.sidebar.checkbox("💡 开启 Tri-axle 补位与前车货物逆向重组", value=True)
+    enable_triaxle_fallback = st.sidebar.checkbox("💡 开启 Tri-axle 补位与前车逆向重组优化", value=True)
 
 st.sidebar.markdown("---")
 
-# Superlink 参数配置
+# Superlink 参数
 st.sidebar.subheader("🚛 Superlink (双挂) 参数")
 f_l = st.sidebar.number_input("前板长 (m)", value=6.0, step=0.1, key="f_l")
 f_w = st.sidebar.number_input("前板宽 (m)", value=2.7, step=0.05, key="f_w")
@@ -46,7 +55,7 @@ superlink_decks = [
     {"name": "后面板", "en_name": "Rear Deck", "L": r_l, "W": r_w, "H": r_h, "MaxW": r_m}
 ]
 
-# Tri-axle 参数配置
+# Tri-axle 参数
 st.sidebar.subheader("🚚 Tri-axle (三轴单挂) 参数")
 t_l = st.sidebar.number_input("单挂长 (m)", value=12.0, step=0.1, key="t_l")
 t_w = st.sidebar.number_input("单挂宽 (m)", value=2.7, step=0.05, key="t_w")
@@ -63,9 +72,9 @@ triaxle_decks = [
 st.header("📥 2. 全量待装货物清单")
 
 default_data = pd.DataFrame([
-    {"货物编码": "ST-A01", "长(m)": 2.5, "宽(m)": 0.8, "高(m)": 1.2, "重量(kg)": 1200, "数量": 8},
-    {"货物编码": "ST-B02", "长(m)": 2.0, "宽(m)": 1.2, "高(m)": 1.1, "重量(kg)": 1500, "数量": 6},
-    {"货物编码": "ST-C03", "长(m)": 1.2, "宽(m)": 1.0, "高(m)": 1.0, "重量(kg)": 800, "数量": 12},
+    {"货物编码": "ST-A01", "长(m)": 2.5, "宽(m)": 0.8, "高(m)": 1.2, "重量(kg)": 1200, "数量": 20},
+    {"货物编码": "ST-B02", "长(m)": 2.0, "宽(m)": 1.2, "高(m)": 1.1, "重量(kg)": 1500, "数量": 15},
+    {"货物编码": "ST-C03", "长(m)": 1.2, "宽(m)": 1.0, "高(m)": 1.0, "重量(kg)": 800, "数量": 30},
     {"货物编码": "ST-ERR", "长(m)": 13.0, "宽(m)": 1.0, "高(m)": 3.0, "重量(kg)": 5000, "数量": 1},
 ])
 
@@ -79,7 +88,7 @@ else:
 cargo_df = st.data_editor(df_input, num_rows="dynamic", use_container_width=True, key="cargo_editor")
 
 # =========================================================
-# 🧮 3. 核心算法：自适应长宽旋转 + 双层物理堆叠检验
+# 🧮 3. 大规模核心配载算法（100车高效扩展）
 # =========================================================
 items_pool = []
 seq_counter = 1
@@ -88,7 +97,6 @@ for _, row in cargo_df.iterrows():
     w_val = float(row["宽(m)"])
     h_val = float(row["高(m)"])
     
-    # 自动校验单位（如果是mm/cm则转m）
     if l_val > 50: l_val /= 1000.0
     if w_val > 50: w_val /= 1000.0
     if h_val > 50: h_val /= 1000.0
@@ -129,7 +137,6 @@ for item in items_pool:
 
 valid_items.sort(key=lambda x: (x["l"] * x["w"], max(x["l"], x["w"])), reverse=True)
 
-# 挂板装载核心函数（包含双层堆叠演算）
 def pack_deck_with_stacking(deck_info, unpacked_list, truck_name, allow_stack):
     d_l, d_w, d_h, d_max_w = deck_info["L"], deck_info["W"], deck_info["H"], deck_info["MaxW"]
     deck_weight = 0.0
@@ -143,7 +150,6 @@ def pack_deck_with_stacking(deck_info, unpacked_list, truck_name, allow_stack):
         row_max_len = 0.0
         row_removed = []
         
-        # 1. 铺设底层（Layer 1）
         for item in unpacked_list:
             if item in items_to_remove or item in row_removed:
                 continue
@@ -186,9 +192,8 @@ def pack_deck_with_stacking(deck_info, unpacked_list, truck_name, allow_stack):
             break
             
         y_offset = (d_w - curr_y) / 2.0
-        
-        # 将底层加入最终列表
         layer1_entries = []
+        
         for r_item in row_items:
             entry = {
                 "item_raw": r_item["item_ref"],
@@ -212,23 +217,18 @@ def pack_deck_with_stacking(deck_info, unpacked_list, truck_name, allow_stack):
             layer1_entries.append(entry)
             items_to_remove.append(r_item["item_ref"])
 
-        # 2. 堆叠上层（Layer 2，只有在勾选 allow_stack 时执行）
+        # 双层堆叠逻辑
         if allow_stack:
-            # 在刚刚排好的底层（layer1_entries）上面尝试寻找符合条件的上层货物
             for base in layer1_entries:
-                # 底座允许尺寸与基准高度
                 base_x, base_y, base_z = base["坐标X(m)"], base["坐标Y(m)"], base["坐标Z(m)"]
                 base_l, base_w, base_h = base["摆放长(m)"], base["摆放宽(m)"], base["高(m)"]
                 
-                # 寻找能叠在 base 上方的货物
                 for top_item in unpacked_list:
                     if top_item in items_to_remove:
                         continue
-                    # 规则 4: 总高度检验
                     if base_h + top_item["h"] > d_h or deck_weight + top_item["weight"] > d_max_w:
                         continue
                     
-                    # 规则 3: 上层长宽自适应调换且不超过底座限制
                     top_cand = []
                     if top_item["l"] <= base_l and top_item["w"] <= base_w:
                         top_cand.append({"l": top_item["l"], "w": top_item["w"], "swapped": False})
@@ -237,7 +237,6 @@ def pack_deck_with_stacking(deck_info, unpacked_list, truck_name, allow_stack):
                         
                     if top_cand:
                         best_top = min(top_cand, key=lambda c: (c["l"] * c["w"]))
-                        
                         top_entry = {
                             "item_raw": top_item,
                             "序号": top_item["seq"],
@@ -259,7 +258,7 @@ def pack_deck_with_stacking(deck_info, unpacked_list, truck_name, allow_stack):
                         placed_items.append(top_entry)
                         items_to_remove.append(top_item)
                         deck_weight += top_item["weight"]
-                        break # 底座已使用，寻找下一个上层堆叠点
+                        break
             
         curr_x += row_max_len
         
@@ -270,6 +269,7 @@ unpacked_items = valid_items.copy()
 current_type = primary_truck_type
 reallocated_info = []
 
+# 大车队连续调度循环（支持最高 100 辆）
 for truck_idx in range(1, max_truck_count + 1):
     if not unpacked_items:
         break
@@ -306,12 +306,12 @@ for truck_idx in range(1, max_truck_count + 1):
             unpacked_items.sort(key=lambda x: (x["l"] * x["w"], max(x["l"], x["w"])), reverse=True)
 
     if current_type == "Superlink (双挂)":
-        truck_name = f"车辆 #{truck_idx} (Superlink)"
-        truck_en_name = f"Truck #{truck_idx} (Superlink)"
+        truck_name = f"车辆 #{truck_idx:02d} (Superlink)"
+        truck_en_name = f"Truck #{truck_idx:02d} (Superlink)"
         active_decks = superlink_decks
     else:
-        truck_name = f"车辆 #{truck_idx} (Tri-axle - 重组优化版)"
-        truck_en_name = f"Truck #{truck_idx} (Tri-axle)"
+        truck_name = f"车辆 #{truck_idx:02d} (Tri-axle - 重组优化版)"
+        truck_en_name = f"Truck #{truck_idx:02d} (Tri-axle)"
         active_decks = triaxle_decks
 
     current_truck_success = []
@@ -364,7 +364,7 @@ if reallocated_info:
     for info in reallocated_info:
         st.success(f"🎯 **全局重组优化成功：** {info}")
 
-st.subheader("🟢 多车成功配载清单 (含层级与堆叠坐标)")
+st.subheader("🟢 多车成功配载清单 (支持大表查看与导出)")
 if not df_all_success.empty:
     show_success = df_all_success[["序号", "货物编码", "归属车辆", "分配挂板", "层级", "摆放长(m)", "摆放宽(m)", "高(m)", "长宽调换", "重量(kg)", "坐标X(m)", "坐标Y(m)", "坐标Z(m)"]]
     st.dataframe(show_success.style.apply(lambda s: ['background-color: #d1fae5; color: #065f46; font-weight: bold;'] * len(s), axis=1), use_container_width=True)
@@ -381,13 +381,15 @@ else:
     st.success("🎉 所有货物已全部通过车队分配装载完毕！")
 
 # =========================================================
-# 🖼️ 5. 分车辆 2D 与 3D 效果图绘制 (支持双层立体展示)
+# 🖼️ 5. 分车辆 2D 与 3D 效果图绘制 (支持100辆车下拉筛选)
 # =========================================================
 st.header("🖼️ 4. 分车辆装载 2D / 3D 效果图")
 
 if truck_results:
     truck_names = [tr["truck_name"] for tr in truck_results]
-    selected_truck_name = st.selectbox("🚚 选择要查看的车辆方案：", truck_names)
+    
+    # 支持多达 100 辆车的快捷下拉搜索框
+    selected_truck_name = st.selectbox("🚚 选择要查看的车辆方案 (支持搜索与100辆选择)：", truck_names)
     
     selected_truck_data = next(tr for tr in truck_results if tr["truck_name"] == selected_truck_name)
     selected_items_df = pd.DataFrame(selected_truck_data["items"])
@@ -427,7 +429,7 @@ if truck_results:
                                   item["摆放长(m)"], item["摆放宽(m)"], item["高(m)"], color=c, label=lbl)
 
             fig3d.update_layout(
-                title=f"{selected_truck_name} - 【{d_name}】 3D 优化装配图 (含双层堆叠高度 Z 轴)",
+                title=f"{selected_truck_name} - 【{d_name}】 3D 优化装配图",
                 scene=dict(
                     xaxis=dict(title='车长 X (m)', range=[-0.5, d_l + 0.5]),
                     yaxis=dict(title='车宽 Y (m)', range=[-0.5, d_w + 0.5]),
@@ -455,7 +457,6 @@ if truck_results:
 
             for item_idx, item in deck_items.iterrows():
                 c = colors_palette[int(item_idx) % len(colors_palette)]
-                # 上层货物使用虚线边框标注
                 line_style = '--' if "L2" in item["层级"] else '-'
                 rect = patches.Rectangle((item["坐标X(m)"], item["坐标Y(m)"]), item["摆放长(m)"], item["摆放宽(m)"], 
                                          linewidth=1.5, linestyle=line_style, edgecolor='black', facecolor=c, alpha=0.8, zorder=2)
@@ -474,7 +475,7 @@ if truck_results:
             ax.set_xlim(-0.5, d_l + 0.5)
             ax.set_ylim(-0.5, d_w + 0.5)
             ax.set_aspect('equal')
-            ax.set_title(f"Truck #{selected_truck_data['truck_id']} - [{d_en_name}] 2D Layout (W: {d_w}m, L: {d_l}m)")
+            ax.set_title(f"Truck #{selected_truck_data['truck_id']:02d} - [{d_en_name}] 2D Layout (W: {d_w}m, L: {d_l}m)")
             ax.legend(loc="upper right", fontsize=8)
 
         st.pyplot(fig2d)
