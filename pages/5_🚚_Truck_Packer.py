@@ -5,18 +5,27 @@ import matplotlib.patches as patches
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="Multi-Truck Packing System", layout="wide")
-st.title("🚛 货物多车连续装载系统 (全局重组与运力极简版)")
+st.title("🚛 货物多车连续装载系统 (双层堆叠与混合排布版)")
 
 # =========================================================
-# ⚙️ 1. 车型规格与参数配置
+# ⚙️ 1. 车型规格与堆叠参数配置
 # =========================================================
-st.sidebar.header("⚙️ 1. 车队规格与车辆数量")
+st.sidebar.header("⚙️ 1. 车队规格与装载限制")
 primary_truck_type = st.sidebar.radio("默认首选车型", ["Superlink (双挂)", "Tri-axle (三轴单挂)"])
-max_truck_count = st.sidebar.number_input("允许调配的最大总车辆数 (辆)", min_value=1, max_value=20, value=5, step=1)
+max_truck_count = st.sidebar.number_input("允许调配的最大总车辆数 (辆)", min_value=1, max_value=20, value=7, step=1)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🏗️ 堆叠规则控制")
+
+# 核心开关：选择是否开启高度堆叠
+enable_stacking = st.sidebar.checkbox("📦 允许货物双层堆叠 (Double Stacking, 最多2层)", value=False)
+
+if enable_stacking:
+    st.sidebar.info("💡 **堆叠规则已生效：**\n1. 最多2层，严禁3层\n2. 底层组合高度必须平整\n3. 上层底面不可悬空\n4. 上层允许长宽调换，高度固定\n5. 总高不超过车厢限制")
 
 enable_triaxle_fallback = False
 if primary_truck_type == "Superlink (双挂)":
-    enable_triaxle_fallback = st.sidebar.checkbox("💡 开启 Tri-axle 补位与前车货物逆向重组优化 (减少总车辆数)", value=True)
+    enable_triaxle_fallback = st.sidebar.checkbox("💡 开启 Tri-axle 补位与前车货物逆向重组", value=True)
 
 st.sidebar.markdown("---")
 
@@ -54,9 +63,9 @@ triaxle_decks = [
 st.header("📥 2. 全量待装货物清单")
 
 default_data = pd.DataFrame([
-    {"货物编码": "ST-A01", "长(m)": 2.5, "宽(m)": 0.8, "高(m)": 1.5, "重量(kg)": 1200, "数量": 6},
-    {"货物编码": "ST-B02", "长(m)": 2.0, "宽(m)": 1.2, "高(m)": 1.8, "重量(kg)": 3500, "数量": 4},
-    {"货物编码": "ST-C03", "长(m)": 1.2, "宽(m)": 1.0, "高(m)": 1.0, "重量(kg)": 800, "数量": 10},
+    {"货物编码": "ST-A01", "长(m)": 2.5, "宽(m)": 0.8, "高(m)": 1.2, "重量(kg)": 1200, "数量": 8},
+    {"货物编码": "ST-B02", "长(m)": 2.0, "宽(m)": 1.2, "高(m)": 1.1, "重量(kg)": 1500, "数量": 6},
+    {"货物编码": "ST-C03", "长(m)": 1.2, "宽(m)": 1.0, "高(m)": 1.0, "重量(kg)": 800, "数量": 12},
     {"货物编码": "ST-ERR", "长(m)": 13.0, "宽(m)": 1.0, "高(m)": 3.0, "重量(kg)": 5000, "数量": 1},
 ])
 
@@ -70,18 +79,27 @@ else:
 cargo_df = st.data_editor(df_input, num_rows="dynamic", use_container_width=True, key="cargo_editor")
 
 # =========================================================
-# 🧮 3. 核心算法：带全局重组（Re-allocation）的智能排布引擎
+# 🧮 3. 核心算法：自适应长宽旋转 + 双层物理堆叠检验
 # =========================================================
 items_pool = []
 seq_counter = 1
 for _, row in cargo_df.iterrows():
+    l_val = float(row["长(m)"])
+    w_val = float(row["宽(m)"])
+    h_val = float(row["高(m)"])
+    
+    # 自动校验单位（如果是mm/cm则转m）
+    if l_val > 50: l_val /= 1000.0
+    if w_val > 50: w_val /= 1000.0
+    if h_val > 50: h_val /= 1000.0
+    
     for _ in range(int(row["数量"])):
         items_pool.append({
             "seq": f"#{seq_counter}",
             "code": str(row["货物编码"]),
-            "l": float(row["长(m)"]),
-            "w": float(row["宽(m)"]),
-            "h": float(row["高(m)"]),
+            "l": l_val,
+            "w": w_val,
+            "h": h_val,
             "weight": float(row["重量(kg)"])
         })
         seq_counter += 1
@@ -96,23 +114,23 @@ final_failed_items = []
 
 for item in items_pool:
     if item["h"] > global_max_h:
-        final_failed_items.append({**item, "最终拒绝原因": f"高度 ({item['h']}m) 超过卡车最高限制 ({global_max_h}m)"})
+        final_failed_items.append({**item, "最终拒绝原因": f"高度 ({item['h']}m) 超过限制 ({global_max_h}m)"})
         continue
     fit_normal = (item["l"] <= global_max_l and item["w"] <= global_max_w)
     fit_swapped = (item["w"] <= global_max_l and item["l"] <= global_max_w)
     if not (fit_normal or fit_swapped):
-        final_failed_items.append({**item, "最终拒绝原因": f"尺寸 ({item['l']}x{item['w']}m) 调换长宽均超出最大车厢尺寸"})
+        final_failed_items.append({**item, "最终拒绝原因": f"尺寸 ({item['l']}x{item['w']}m) 超出车厢限制"})
         continue
     if item["weight"] > global_max_weight:
-        final_failed_items.append({**item, "最终拒绝原因": f"单重 ({item['weight']}kg) 超过单板最高载重限制"})
+        final_failed_items.append({**item, "最终拒绝原因": f"单重 ({item['weight']}kg) 超过限重"})
         continue
 
     valid_items.append(item)
 
 valid_items.sort(key=lambda x: (x["l"] * x["w"], max(x["l"], x["w"])), reverse=True)
 
-# 挂板装载核心子函数
-def pack_deck_rows(deck_info, unpacked_list, truck_name):
+# 挂板装载核心函数（包含双层堆叠演算）
+def pack_deck_with_stacking(deck_info, unpacked_list, truck_name, allow_stack):
     d_l, d_w, d_h, d_max_w = deck_info["L"], deck_info["W"], deck_info["H"], deck_info["MaxW"]
     deck_weight = 0.0
     curr_x = 0.0
@@ -125,6 +143,7 @@ def pack_deck_rows(deck_info, unpacked_list, truck_name):
         row_max_len = 0.0
         row_removed = []
         
+        # 1. 铺设底层（Layer 1）
         for item in unpacked_list:
             if item in items_to_remove or item in row_removed:
                 continue
@@ -154,7 +173,9 @@ def pack_deck_rows(deck_info, unpacked_list, truck_name):
                     "h": item["h"],
                     "weight": item["weight"],
                     "swapped": best_cand["swapped"],
-                    "rel_y": curr_y
+                    "rel_y": curr_y,
+                    "layer": 1,
+                    "z": 0.0
                 })
                 curr_y += best_cand["w"]
                 row_max_len = max(row_max_len, best_cand["l"])
@@ -165,8 +186,11 @@ def pack_deck_rows(deck_info, unpacked_list, truck_name):
             break
             
         y_offset = (d_w - curr_y) / 2.0
+        
+        # 将底层加入最终列表
+        layer1_entries = []
         for r_item in row_items:
-            placed_items.append({
+            entry = {
                 "item_raw": r_item["item_ref"],
                 "序号": r_item["seq"],
                 "货物编码": r_item["code"],
@@ -181,9 +205,61 @@ def pack_deck_rows(deck_info, unpacked_list, truck_name):
                 "重量(kg)": r_item["weight"],
                 "坐标X(m)": round(curr_x, 2),
                 "坐标Y(m)": round(r_item["rel_y"] + y_offset, 2),
-                "坐标Z(m)": 0.0
-            })
+                "坐标Z(m)": 0.0,
+                "层级": "底层 (L1)"
+            }
+            placed_items.append(entry)
+            layer1_entries.append(entry)
             items_to_remove.append(r_item["item_ref"])
+
+        # 2. 堆叠上层（Layer 2，只有在勾选 allow_stack 时执行）
+        if allow_stack:
+            # 在刚刚排好的底层（layer1_entries）上面尝试寻找符合条件的上层货物
+            for base in layer1_entries:
+                # 底座允许尺寸与基准高度
+                base_x, base_y, base_z = base["坐标X(m)"], base["坐标Y(m)"], base["坐标Z(m)"]
+                base_l, base_w, base_h = base["摆放长(m)"], base["摆放宽(m)"], base["高(m)"]
+                
+                # 寻找能叠在 base 上方的货物
+                for top_item in unpacked_list:
+                    if top_item in items_to_remove:
+                        continue
+                    # 规则 4: 总高度检验
+                    if base_h + top_item["h"] > d_h or deck_weight + top_item["weight"] > d_max_w:
+                        continue
+                    
+                    # 规则 3: 上层长宽自适应调换且不超过底座限制
+                    top_cand = []
+                    if top_item["l"] <= base_l and top_item["w"] <= base_w:
+                        top_cand.append({"l": top_item["l"], "w": top_item["w"], "swapped": False})
+                    if top_item["w"] <= base_l and top_item["l"] <= base_w:
+                        top_cand.append({"l": top_item["w"], "w": top_item["l"], "swapped": True})
+                        
+                    if top_cand:
+                        best_top = min(top_cand, key=lambda c: (c["l"] * c["w"]))
+                        
+                        top_entry = {
+                            "item_raw": top_item,
+                            "序号": top_item["seq"],
+                            "货物编码": top_item["code"],
+                            "归属车辆": truck_name,
+                            "分配挂板": base["分配挂板"],
+                            "分配挂板英文": base["分配挂板英文"],
+                            "摆放长(m)": best_top["l"],
+                            "摆放宽(m)": best_top["w"],
+                            "高(m)": top_item["h"],
+                            "长宽调换": "已调换" if best_top["swapped"] else "正放",
+                            "swapped_bool": best_top["swapped"],
+                            "重量(kg)": top_item["weight"],
+                            "坐标X(m)": base_x,
+                            "坐标Y(m)": base_y,
+                            "坐标Z(m)": round(base_h, 2),
+                            "层级": "上层 (L2 堆叠)"
+                        }
+                        placed_items.append(top_entry)
+                        items_to_remove.append(top_item)
+                        deck_weight += top_item["weight"]
+                        break # 底座已使用，寻找下一个上层堆叠点
             
         curr_x += row_max_len
         
@@ -198,7 +274,6 @@ for truck_idx in range(1, max_truck_count + 1):
     if not unpacked_items:
         break
 
-    # 判断 Superlink 装不下时，是否开启全局逆向“借调重组”
     if primary_truck_type == "Superlink (双挂)" and enable_triaxle_fallback and current_type == "Superlink (双挂)":
         can_fit_superlink = False
         for item in unpacked_items:
@@ -210,27 +285,20 @@ for truck_idx in range(1, max_truck_count + 1):
             if can_fit_superlink:
                 break
                 
-        # 触发重组逻辑
         if not can_fit_superlink:
             current_type = "Tri-axle (三轴单挂)"
-            
-            # 从已装前的 Superlink 里提取部分轻便/常规货物与当前大件拼在一辆 Tri-axle 上
             stolen_items = []
             for tr in reversed(truck_results):
                 if "Superlink" in tr["truck_name"]:
-                    # 将该车部分或全部货物临时放入“可合并池”
                     candidate_stolen = [item_entry["item_raw"] for item_entry in tr["items"]]
-                    
-                    # 测试这些被借调的货物与当前未装货物一起能否塞入一辆 Tri-axle
                     test_combined = unpacked_items + candidate_stolen
                     test_combined.sort(key=lambda x: (x["l"] * x["w"], max(x["l"], x["w"])), reverse=True)
                     
-                    test_placed, test_removed = pack_deck_rows(triaxle_decks[0], test_combined, "TestTruck")
+                    test_placed, test_removed = pack_deck_with_stacking(triaxle_decks[0], test_combined, "TestTruck", enable_stacking)
                     
-                    # 如果能明显提升装载密度（把借调货物和超规大件装进同一辆车），执行借调并消灭前车
                     if len(test_removed) > len(unpacked_items):
                         stolen_items.extend(candidate_stolen)
-                        truck_results.remove(tr) # 消除原前面的 Superlink，减少总车数！
+                        truck_results.remove(tr)
                         reallocated_info.append(f"成功将前面【{tr['truck_name']}】的货物借调重组，消灭了该 Superlink 车辆！")
                         break
 
@@ -248,7 +316,7 @@ for truck_idx in range(1, max_truck_count + 1):
 
     current_truck_success = []
     for d_info in active_decks:
-        placed, removed = pack_deck_rows(d_info, unpacked_items, truck_name)
+        placed, removed = pack_deck_with_stacking(d_info, unpacked_items, truck_name, enable_stacking)
         current_truck_success.extend(placed)
         for rm in removed:
             unpacked_items.remove(rm)
@@ -296,9 +364,9 @@ if reallocated_info:
     for info in reallocated_info:
         st.success(f"🎯 **全局重组优化成功：** {info}")
 
-st.subheader("🟢 多车成功配载清单")
+st.subheader("🟢 多车成功配载清单 (含层级与堆叠坐标)")
 if not df_all_success.empty:
-    show_success = df_all_success[["序号", "货物编码", "归属车辆", "分配挂板", "摆放长(m)", "摆放宽(m)", "高(m)", "长宽调换", "重量(kg)", "坐标X(m)", "坐标Y(m)"]]
+    show_success = df_all_success[["序号", "货物编码", "归属车辆", "分配挂板", "层级", "摆放长(m)", "摆放宽(m)", "高(m)", "长宽调换", "重量(kg)", "坐标X(m)", "坐标Y(m)", "坐标Z(m)"]]
     st.dataframe(show_success.style.apply(lambda s: ['background-color: #d1fae5; color: #065f46; font-weight: bold;'] * len(s), axis=1), use_container_width=True)
 else:
     st.warning("⚠️ 没有任何货物成功装载！")
@@ -313,7 +381,7 @@ else:
     st.success("🎉 所有货物已全部通过车队分配装载完毕！")
 
 # =========================================================
-# 🖼️ 5. 分车辆 2D 与 3D 效果图绘制
+# 🖼️ 5. 分车辆 2D 与 3D 效果图绘制 (支持双层立体展示)
 # =========================================================
 st.header("🖼️ 4. 分车辆装载 2D / 3D 效果图")
 
@@ -326,7 +394,7 @@ if truck_results:
     
     tab_3d, tab_2d = st.tabs(["🧊 3D 交互式立体视图", "📐 2D 平面俯视图"])
 
-    def add_cube_3d(fig, x, y, z, dx, dy, dz, color, label, opacity=0.85):
+    def add_cube_3d_clean(fig, x, y, z, dx, dy, dz, color, label, opacity=0.85):
         x_pts = [x, x+dx, x+dx, x, x, x+dx, x+dx, x]
         y_pts = [y, y, y+dy, y+dy, y, y, y+dy, y+dy]
         z_pts = [z, z, z, z, z+dz, z+dz, z+dz, z+dz]
@@ -337,12 +405,7 @@ if truck_results:
         fig.add_trace(go.Mesh3d(
             x=x_pts, y=y_pts, z=z_pts, i=i_pts, j=j_pts, k=k_pts,
             color=color, opacity=opacity, name=label,
-            hovertemplate=f"<b>{label}</b><br>尺寸: {dx}x{dy}x{dz}m<extra></extra>"
-        ))
-        fig.add_trace(go.Scatter3d(
-            x=[x + dx/2], y=[y + dy/2], z=[z + dz + 0.15],
-            mode='text', text=[label], textposition="top center",
-            textfont=dict(size=12, color="black", family="Arial Black"), showlegend=False
+            hovertemplate=f"<b>{label}</b><br>尺寸: {dx:.2f} x {dy:.2f} x {dz:.2f}m<br>坐标: X={x:.2f}, Y={y:.2f}, Z={z:.2f}<extra></extra>"
         ))
 
     colors_palette = ['#2563eb', '#059669', '#d97706', '#7c3aed', '#db2777', '#0891b2']
@@ -353,25 +416,25 @@ if truck_results:
             d_l, d_w, d_h = deck["L"], deck["W"], deck["H"]
             
             fig3d = go.Figure()
-            add_cube_3d(fig3d, 0, 0, 0, d_l, d_w, d_h, color="#94a3b8", label=f"车厢 ({d_name})", opacity=0.08)
+            add_cube_3d_clean(fig3d, 0, 0, 0, d_l, d_w, d_h, color="#94a3b8", label=f"车厢 ({d_name})", opacity=0.05)
 
             deck_items = selected_items_df[selected_items_df["分配挂板"] == d_name] if not selected_items_df.empty else pd.DataFrame()
             
             for idx, item in deck_items.iterrows():
                 c = colors_palette[int(idx) % len(colors_palette)]
-                lbl = f"{item['序号']} ({item['货物编码']})"
-                add_cube_3d(fig3d, item["坐标X(m)"], item["坐标Y(m)"], item["坐标Z(m)"], 
-                            item["摆放长(m)"], item["摆放宽(m)"], item["高(m)"], color=c, label=lbl)
+                lbl = f"{item['序号']} ({item['货物编码']}) [{item['层级']}]"
+                add_cube_3d_clean(fig3d, item["坐标X(m)"], item["坐标Y(m)"], item["坐标Z(m)"], 
+                                  item["摆放长(m)"], item["摆放宽(m)"], item["高(m)"], color=c, label=lbl)
 
             fig3d.update_layout(
-                title=f"{selected_truck_name} - 【{d_name}】 3D 优化装配图",
+                title=f"{selected_truck_name} - 【{d_name}】 3D 优化装配图 (含双层堆叠高度 Z 轴)",
                 scene=dict(
                     xaxis=dict(title='车长 X (m)', range=[-0.5, d_l + 0.5]),
                     yaxis=dict(title='车宽 Y (m)', range=[-0.5, d_w + 0.5]),
                     zaxis=dict(title='车高 Z (m)', range=[0, d_h + 0.5]),
                     aspectmode='data'
                 ),
-                margin=dict(l=0, r=0, b=0, t=40), height=480
+                margin=dict(l=0, r=0, b=0, t=40), height=520
             )
             st.plotly_chart(fig3d, use_container_width=True)
 
@@ -392,14 +455,21 @@ if truck_results:
 
             for item_idx, item in deck_items.iterrows():
                 c = colors_palette[int(item_idx) % len(colors_palette)]
+                # 上层货物使用虚线边框标注
+                line_style = '--' if "L2" in item["层级"] else '-'
                 rect = patches.Rectangle((item["坐标X(m)"], item["坐标Y(m)"]), item["摆放长(m)"], item["摆放宽(m)"], 
-                                         linewidth=1.2, edgecolor='black', facecolor=c, alpha=0.85, zorder=2)
+                                         linewidth=1.5, linestyle=line_style, edgecolor='black', facecolor=c, alpha=0.8, zorder=2)
                 ax.add_patch(rect)
                 
-                swap_mark = "Rotated" if item['swapped_bool'] else "Normal"
-                txt_label = f"{item['序号']}\n{item['货物编码']}\n({swap_mark})"
-                ax.text(item["坐标X(m)"] + item["摆放长(m)"]/2, item["坐标Y(m)"] + item["摆放宽(m)"]/2, 
-                        txt_label, color='white', weight='bold', fontsize=7, ha='center', va='center', zorder=4)
+                box_l, box_w = item["摆放长(m)"], item["摆放宽(m)"]
+                calc_font_size = min(box_l * 2.5, box_w * 2.5, 7.0)
+                
+                if calc_font_size >= 3.5:
+                    layer_tag = "L2" if "L2" in item["层级"] else "L1"
+                    swap_mark = "R" if item['swapped_bool'] else "N"
+                    txt_label = f"{item['序号']}({layer_tag})\n{item['货物编码']}\n({swap_mark})"
+                    ax.text(item["坐标X(m)"] + box_l/2, item["坐标Y(m)"] + box_w/2, 
+                            txt_label, color='white', weight='bold', fontsize=calc_font_size, ha='center', va='center', zorder=4)
 
             ax.set_xlim(-0.5, d_l + 0.5)
             ax.set_ylim(-0.5, d_w + 0.5)
