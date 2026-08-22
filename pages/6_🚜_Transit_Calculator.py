@@ -1,25 +1,31 @@
 import streamlit as st
 
 # ==========================================
-# 1. 基础配置与资费常量定义 (ZAR)
+# 1. 基础配置与资费常量定义 (ZAR Excl. VAT)
+# 依据 TPT 官方报价单 Quotation 24081825 标准
 # ==========================================
 USD_TO_ZAR = 18.20  # 汇率基准
 
-# 1.1 TNPA 官方 Cargo Dues 规费 (不含税 ZAR)
-TNPA_MACHINERY_CARGO_DUES_PER_TON = 183.16  # 工程机械 Cargo Dues (依据 TNPA 发票 978337070 真实标准: R 183.16 / 吨)
+# 1.1 TNPA 官方 Cargo Dues 规费
+TNPA_MACHINERY_CARGO_DUES_PER_TON = 183.16  # 工程机械 Cargo Dues (依据 TNPA 发票 978337070: R 183.16 / 吨)
 TNPA_BREAKBULK_CARGO_DUES_PER_RT = 45.00    # 普通散货 RIT 转关 Cargo Dues (按 R 45.00 / RT)
 
-# 1.2 码头及私营堆场操作费 (Terminal Handling Charges - THC)
-MACHINERY_THC_PER_UNIT = 4000.00       # 工程机械/车辆 THC (R 4,000.00 / 台)
-BREAKBULK_THC_PER_RT = 467.50          # 散货/零部件大件 THC (R 467.50 / RT，参考发票 THC-P004-IG 标准)
+# 1.2 TPT 官方 Terminal Handling Charges (THC) 费率 (按吨计费)
+TPT_MACHINERY_THC_DIRECT_PER_TON = 431.00   # 工程机械船边直取 (BB Abnormal Direct)
+TPT_MACHINERY_THC_INDIRECT_PER_TON = 771.50 # 工程机械落码头堆场 (Abnormal Indirect TPT Equipment)
+TPT_BREAKBULK_THC_PER_TON = 403.00          # 散货/零部件装卸 (BB Cargo EOHP)
 
-# 1.3 私营保税仓 (Private Bonded Warehouse, 如 KHOLD/Vukuzenzele) 其他规费
-BONDED_VEHICLE_INOUT_FEE = 2500.00      # 车辆进出仓固定费/台
-BONDED_STORAGE_PER_TON_PER_DAY = 30.00  # 堆存费: 吨/天
+# 1.3 码头与私营堆场超期堆存费率 (ZAR / 吨 / 天)
+TPT_MACHINERY_STORAGE_PER_TON_DAY = 32.00   # 超限大件/机械室外堆存 (BB Abnormal Outside)
+TPT_BREAKBULK_STORAGE_PER_TON_DAY = 23.00  # 普通散货室外堆存 (BB Other Outside)
 
-# 1.4 换单及清关固定第三方规费
-DO_RELEASE_FEE = 1280.00                # 船代换单 DO + EDI 费 (未含税面额 R 1,280，含税为 R 1,472)
-RIT_BOND_AGENCY_FEE = 6500.00           # 转关 Road Bond & 清关代理包干
+# 1.4 私营保税仓 (如 Vukuzenzele) 额外规费与短驳
+BONDED_VEHICLE_INOUT_FEE = 2500.00          # 车辆/设备进出仓固定费 (ZAR / 台)
+BONDED_HAULAGE_PER_LOAD = 8000.00           # 50 吨级 Lowbed 港区短驳合理单价 (ZAR / 趟)
+
+# 1.5 换单及清关固定第三方规费
+DO_RELEASE_FEE = 1280.00                    # 船代换单 DO + EDI 费 (未含税面额 R 1,280，含税 R 1,472)
+RIT_BOND_AGENCY_FEE = 6500.00               # 转关 Road Bond & 清关代理包干
 
 # ==========================================
 # 2. 页面布局与标题
@@ -27,7 +33,7 @@ RIT_BOND_AGENCY_FEE = 6500.00           # 转关 Road Bond & 清关代理包干
 st.set_page_config(page_title="散货与工程机械转关核算", page_icon="🚜", layout="wide")
 
 st.title("🚜 散货 & 工程机械转关（RIT）港口与私营保税仓核算系统")
-st.caption("适用德班港 (Port of Durban) 转关过境赞比亚/津巴布韦等南部非洲国家成本精算")
+st.caption("基于 TPT 官方 Quotation 24081825 及 TNPA 发票标准精算 (Port of Durban)")
 
 # ==========================================
 # 3. 侧边栏：提货状态与资费参数微调
@@ -37,50 +43,42 @@ with st.sidebar:
     
     pickup_status = st.radio(
         "选择提货提取模式:",
-        ["船边直取/码头免堆期内正常提走 (Normal Direct)", "延误未及时提取 (转入私营 Bonded Warehouse)"]
+        ["船边直取/免堆期内提走 (Direct Discharge)", "延误落码头/转私营保税仓 (Indirect Storage)"]
     )
-    is_delayed = "私营 Bonded Warehouse" in pickup_status
+    is_delayed = "Indirect Storage" in pickup_status
     
     delay_days = 0
     if is_delayed:
-        st.error("⚠️ 已触发私营堆场流程 (产生短驳、进出库及堆存费)")
-        delay_days = st.number_input("私营堆场滞留天数 (Storage Days):", min_value=1, value=5, step=1)
-        st.info("注：私营堆场通常扣除 24 小时免费期后按天计算堆存费。")
+        st.error("⚠️ 已触发堆场流程 (产生更高 THC、短驳及超期堆存费)")
+        delay_days = st.number_input("堆场滞留天数 (Storage Days):", min_value=1, value=5, step=1)
 
     st.markdown("---")
-    st.subheader("💡 关键参数微调")
+    st.subheader("💡 TPT 官方与私营仓费率微调 (Excl. VAT)")
     
-    # 可调节的 TNPA 规费单价
-    custom_tnpa_machinery = st.number_input(
-        "工程机械 Cargo Dues (ZAR / 吨):", 
-        value=TNPA_MACHINERY_CARGO_DUES_PER_TON, 
-        step=5.0,
-        help="依据 TNPA 发票 978337070：Vehicles Other Than Ro-Ro 为 R 183.16 / 吨"
+    # 允许在侧边栏微调 TPT THC 费率
+    custom_machinery_thc_direct = st.number_input(
+        "机械直取 THC (ZAR / 吨):", 
+        value=TPT_MACHINERY_THC_DIRECT_PER_TON, 
+        step=10.0,
+        help="TPT 官方代码 BB Abnormal Direct：R 431.00 / 吨"
     )
-    custom_tnpa_breakbulk = st.number_input(
-        "散货 RIT Cargo Dues (ZAR / RT):", 
-        value=TNPA_BREAKBULK_CARGO_DUES_PER_RT, 
-        step=2.0,
-        help="普通散货转关标准按 R 45.00 / RT 计算"
-    )
-    
-    # 可调节的 THC 单价
-    custom_machinery_thc = st.number_input(
-        "工程机械 THC 单价 (ZAR / 台):", 
-        value=MACHINERY_THC_PER_UNIT, 
-        step=500.0,
-        help="工程机械码头/堆场操作包干费，设定为 R 4,000 / 台"
+    custom_machinery_thc_indirect = st.number_input(
+        "机械落堆场 THC (ZAR / 吨):", 
+        value=TPT_MACHINERY_THC_INDIRECT_PER_TON, 
+        step=10.0,
+        help="TPT 官方代码 Abnormal Indirect TPT Equipment：R 771.50 / 吨"
     )
     custom_breakbulk_thc = st.number_input(
-        "散货/零部件 THC 单价 (ZAR / RT):", 
-        value=BREAKBULK_THC_PER_RT, 
+        "散货/零部件 THC (ZAR / 吨):", 
+        value=TPT_BREAKBULK_THC_PER_TON, 
         step=10.0,
-        help="散货装卸 Handling 费，参考发票标准 R 467.50 / RT"
+        help="TPT 官方代码 BB Cargo EOHP：R 403.00 / 吨"
     )
     
+    st.markdown("---")
     custom_haulage_rate = st.number_input(
         "私营仓短驳单价 (ZAR / 趟):", 
-        value=8000.0, 
+        value=BONDED_HAULAGE_PER_LOAD, 
         step=500.0,
         help="参考 50 吨重件短驳合理价格为 R 8,000 / 趟"
     )
@@ -173,25 +171,31 @@ storage_fee = 0.0
 
 # 5.1 TNPA 官方 Cargo Dues 规费
 if "工程机械" in cargo_type:
-    tnpa_cargo_dues = total_weight_tons * custom_tnpa_machinery
+    tnpa_cargo_dues = total_weight_tons * TNPA_MACHINERY_CARGO_DUES_PER_TON
 else:
-    tnpa_cargo_dues = total_rt * custom_tnpa_breakbulk
+    tnpa_cargo_dues = total_rt * TNPA_BREAKBULK_CARGO_DUES_PER_RT
 
-# 5.2 码头/私营仓 Handling (THC) 费算账逻辑
+# 5.2 TPT 码头装卸 THC 逻辑 (严密匹配 TPT Quotation 24081825 按吨计费规则)
 if "工程机械" in cargo_type:
-    handling_fee = unit_count * custom_machinery_thc
+    if not is_delayed:
+        # 船边直取: BB Abnormal Direct (R 431.00 / 吨)
+        handling_fee = total_weight_tons * custom_machinery_thc_direct
+    else:
+        # 落码头/私营仓堆场: Abnormal Indirect TPT Equipment (R 771.50 / 吨)
+        handling_fee = total_weight_tons * custom_machinery_thc_indirect
 else:
-    handling_fee = total_rt * custom_breakbulk_thc
+    # 散货/零部件: BB Cargo EOHP (R 403.00 / 吨)
+    handling_fee = total_weight_tons * custom_breakbulk_thc
 
-# 5.3 若落私营保税仓，计算额外短驳、进出库费及堆存费
+# 5.3 若延迟落堆场，计算额外短驳费、进出库费及 TPT 超期堆存费
 if is_delayed:
-    loads_needed = int(unit_count) if "工程机械" in cargo_type else max(1, int(total_weight_tons / 25) + 1)
-    haulage_fee = loads_needed * custom_haulage_rate
+    haulage_fee = unit_count * custom_haulage_rate if "工程机械" in cargo_type else max(1, int(total_weight_tons / 25) + 1) * custom_haulage_rate
     
     if "工程机械" in cargo_type:
         bonded_inout_fee = unit_count * BONDED_VEHICLE_INOUT_FEE
-        
-    storage_fee = total_weight_tons * BONDED_STORAGE_PER_TON_PER_DAY * delay_days
+        storage_fee = total_weight_tons * TPT_MACHINERY_STORAGE_PER_TON_DAY * delay_days
+    else:
+        storage_fee = total_weight_tons * TPT_BREAKBULK_STORAGE_PER_TON_DAY * delay_days
 
 # 汇总费用
 total_port_zar = tnpa_cargo_dues + handling_fee + haulage_fee + bonded_inout_fee + storage_fee
@@ -203,7 +207,7 @@ total_all_usd = total_all_zar / usd_rate
 # ==========================================
 kpi1, kpi2, kpi3 = st.columns(3)
 kpi1.metric("TNPA 官方过境规费", f"ZAR {tnpa_cargo_dues:,.2f}", f"${tnpa_cargo_dues/usd_rate:,.2f} USD")
-kpi2.metric("THC / 堆场装卸及短驳", f"ZAR {(handling_fee + haulage_fee + bonded_inout_fee):,.2f}", f"${(handling_fee + haulage_fee + bonded_inout_fee)/usd_rate:,.2f} USD")
+kpi2.metric("TPT THC / 堆场装卸及短驳", f"ZAR {(handling_fee + haulage_fee + bonded_inout_fee):,.2f}", f"${(handling_fee + haulage_fee + bonded_inout_fee)/usd_rate:,.2f} USD")
 kpi3.metric("转关全包硬成本总额 (Total)", f"ZAR {total_all_zar:,.2f}", f"${total_all_usd:,.2f} USD")
 
 # 详细清单表格
@@ -212,10 +216,10 @@ st.markdown("### 📋 明细对账表 (Breakdown)")
 breakdown_data = {
     "费用名目 (Item Description)": [
         "TNPA Cargo Dues (港务局过境规费)",
-        "Terminal Handling Charges - THC (码头/堆场操作费)",
+        "TPT Terminal Handling Charges - THC (码头装卸费)",
         "Internal Haulage (港区至私营堆场短驳费)",
-        "Warehouse In/Out Fee (私营仓进出库费)",
-        "Bonded Storage Fee (私营堆场超期堆存费)",
+        "Warehouse In/Out Fee (保税仓进出库引导费)",
+        "TPT / Bonded Storage Fee (超期堆存费)",
         "Shipping Line DO & EDI Fee (船代换单费)",
         "Customs Road Bond & Agency (清关保税与代理包干)"
     ],
@@ -239,10 +243,10 @@ breakdown_data = {
     ],
     "收费属性说明": [
         f"TNPA 官方法定规费 ({'按毛重 R 183.16/吨' if '工程机械' in cargo_type else '按 RT R 45.00/RT'})",
-        f"THC 操作费 ({'按台数 R 4,000/台' if '工程机械' in cargo_type else '按计费吨 R 467.50/RT'})",
+        f"TPT 官方码头装卸 ({'直取 R 431/吨' if not is_delayed and '工程机械' in cargo_type else '落堆场 R 771.5/吨' if is_delayed and '工程机械' in cargo_type else '散货 R 403/吨'})",
         f"短驳费用 ({'正常直取为 R0' if not is_delayed else f'按每台 R {custom_haulage_rate:,.0f} 算'})",
-        f"私营仓进出库引导 ({'正常直取为 R0' if not is_delayed else 'R 2,500/台'})",
-        f"私营仓堆存 ({'正常直取为 R0' if not is_delayed else f'R30/吨/天 x {delay_days} 天'})",
+        f"堆场进出库费 ({'正常直取为 R0' if not is_delayed else 'R 2,500/台'})",
+        f"TPT 官方超期堆存 ({'正常直取为 R0' if not is_delayed else f'R {TPT_MACHINERY_STORAGE_PER_TON_DAY if \"工程机械\" in cargo_type else TPT_BREAKBULK_STORAGE_PER_TON_DAY}/吨/天 x {delay_days} 天'})",
         "船代固定换单费 (未含税面额 R 1,280)",
         "海关 RIT 申报、保税额度担保及销卷服务"
     ]
